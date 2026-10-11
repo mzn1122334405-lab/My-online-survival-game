@@ -1,0 +1,78 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Cairo", "Segoe UI", system-ui, sans-serif;
+  --font-display: "Cairo", "Segoe UI", system-ui, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  --color-ink: #071018;
+  --color-surface: #101a24;
+  --color-raised: #172330;
+  --color-panel: #0e1c26;
+  --color-line: #2a3d4d;
+  --color-foam: #e8e0d4;
+  --color-muted: #8ea0ad;
+  --color-sand: #c4a574;
+  --color-amber: #c9a227;
+  --color-health: #c4453c;
+  --color-hunger: #d48a3a;
+  --color-thirst: #3a8ec9;
+  --color-stamina: #5aa85a;
+  --color-ok: #6db56d;
+}
+
+@layer base {
+  html,
+  body,
+  #app {
+    margin: 0;
+    min-height: 100%;
+    background: var(--color-ink);
+    color: var(--color-foam);
+    font-family: var(--font-sans);
+  }
+
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+}
+
+html,
+body {
+  overflow: hidden;
+  height: 100%;
+  touch-action: none;
+}
+
+@keyframes tribals-fade {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes tribals-pulse {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation: none !important;
+    transition: none !important;
+  }
+}

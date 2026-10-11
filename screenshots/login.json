@@ -1,0 +1,36 @@
+{
+  "url": "http://127.0.0.1:8080/login",
+  "viewports": {
+    "desktop": {
+      "width": 1280,
+      "height": 800,
+      "status": 200,
+      "title": "TRIBALS",
+      "hasCanvas": false,
+      "bodyTextLen": 220,
+      "bodyTextHash": "a6fc4535233d9e2d29035c569195c3f7cb58ce9a864bfc33334b3ea069930cb3",
+      "bodyTextPrefix": "TRIBALS الحساب سجّل للعب أونلاين والدردشة مع اللاعبين. متابعة مع",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/login.png"
+    },
+    "mobile": {
+      "width": 390,
+      "height": 844,
+      "status": 200,
+      "title": "TRIBALS",
+      "hasCanvas": false,
+      "bodyTextLen": 220,
+      "bodyTextHash": "a6fc4535233d9e2d29035c569195c3f7cb58ce9a864bfc33334b3ea069930cb3",
+      "bodyTextPrefix": "TRIBALS الحساب سجّل للعب أونلاين والدردشة مع اللاعبين. متابعة مع",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/login-mobile.png"
+    }
+  },
+  "brandWarnings": [],
+  "authWarnings": [],
+  "verdictFile": "/workspace/screenshots/login.json"
+}
