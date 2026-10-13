@@ -50,6 +50,9 @@ export type GameHud = {
   minimap: string;
   aimOk: boolean;
   hurt: number;
+  hitMark: number;
+  combo: number;
+  blocking: boolean;
   serverId: ServerId;
 };
 
@@ -96,6 +99,9 @@ export const useGameStore = create<GameHud & Actions>((set, get) => ({
   minimap: "",
   aimOk: false,
   hurt: 0,
+  hitMark: 0,
+  combo: 0,
+  blocking: false,
   serverId: SERVERS[0].id,
   setLang: (lang) => set({ lang }),
   setServer: (serverId) => set({ serverId }),

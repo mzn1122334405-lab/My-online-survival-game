@@ -95,6 +95,18 @@ export function defaultIceServers(): RTCIceServer[] {
   ];
 }
 
+function rtcHeaders(json = false): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (json) headers["content-type"] = "application/json";
+  try {
+    const token = sessionStorage.getItem("grok-auth.bearer-token");
+    if (token) headers.Authorization = `Bearer ${token}`;
+  } catch {
+    /* storage unavailable */
+  }
+  return headers;
+}
+
 export class P2PRoom {
   private readonly opts: P2PRoomOptions;
   private readonly peers = new Map<string, PeerSlot>();
@@ -144,7 +156,7 @@ export class P2PRoom {
     // drops this peer and closes their side of the pair.
     void fetch("/api/rtc", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: rtcHeaders(true),
       body: JSON.stringify({ op: "leave", room: this.opts.room, peer: this.opts.selfId }),
       keepalive: true,
     }).catch(() => {});
@@ -196,7 +208,7 @@ export class P2PRoom {
       name: this.opts.name ?? "",
       since: String(this.cursor),
     });
-    const res = await fetch(`/api/rtc?${params}`);
+    const res = await fetch(`/api/rtc?${params}`, { headers: rtcHeaders() });
     if (this.closed) return;
     if (!res.ok) throw new Error(`signaling poll failed: ${res.status}`);
     const body = (await res.json()) as RtcPollResponse;
@@ -454,7 +466,7 @@ export class P2PRoom {
       try {
         const res = await fetch("/api/rtc", {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: rtcHeaders(true),
           body: JSON.stringify({
             op: "signal",
             room: this.opts.room,

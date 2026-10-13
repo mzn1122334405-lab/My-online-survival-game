@@ -12,7 +12,10 @@
  */
 import { z } from "zod";
 import { getSql, type Sql } from "@/lib/db";
+import { getSessionUser } from "@/lib/auth/verify.server";
 import type { PeerRow, RtcPollResponse, SignalRow } from "./p2p";
+
+const ADMIN_ROOM = "tribals-czar";
 
 const ID = z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/);
 const signalSchema = z.object({
@@ -106,7 +109,22 @@ function json(body: unknown, status = 200): Response {
   });
 }
 
-async function handleGet(url: URL): Promise<Response> {
+async function roomAllowed(request: Request, room: string): Promise<boolean> {
+  if (room !== ADMIN_ROOM) return true;
+  const header = request.headers.get("authorization") ?? "";
+  const bearer = header.toLowerCase().startsWith("bearer ") ? header.slice(7).trim() : undefined;
+  const user = await getSessionUser(bearer || undefined);
+  if (!user) return false;
+  const sql = await getSql();
+  const rows = await sql<{ username: string; is_admin: boolean }>`
+    select username, is_admin from profiles where user_id = ${user.id}
+  `;
+  const row = rows[0];
+  if (!row) return false;
+  return row.is_admin || row.username.toLowerCase() === "sultan1v4";
+}
+
+async function handleGet(request: Request, url: URL): Promise<Response> {
   const parsed = z
     .object({
       room: ID,
@@ -122,6 +140,7 @@ async function handleGet(url: URL): Promise<Response> {
     });
   if (!parsed.success) return json({ error: "invalid query" }, 400);
   const { room, peer, name, since } = parsed.data;
+  if (!(await roomAllowed(request, room))) return json({ error: "admin only" }, 403);
 
   const sql = await getSql();
   await ensureSchema(sql);
@@ -160,6 +179,7 @@ async function handlePost(request: Request): Promise<Response> {
   const parsed = postSchema.safeParse(body);
   if (!parsed.success) return json({ error: "invalid request" }, 400);
   const msg = parsed.data;
+  if (!(await roomAllowed(request, msg.room))) return json({ error: "admin only" }, 403);
   const sql = await getSql();
   await ensureSchema(sql);
 
@@ -180,7 +200,7 @@ async function handlePost(request: Request): Promise<Response> {
 
 export async function handleSignaling(request: Request): Promise<Response> {
   try {
-    if (request.method === "GET") return await handleGet(new URL(request.url));
+    if (request.method === "GET") return await handleGet(request, new URL(request.url));
     if (request.method === "POST") return await handlePost(request);
     return json({ error: "method not allowed" }, 405);
   } catch (error) {

@@ -9,6 +9,9 @@ export type Profile = {
   userId: string;
   username: string;
   isAdmin: boolean;
+  isFounder: boolean;
+  nameColor: string;
+  premium: boolean;
 };
 
 export type ChatRow = {
@@ -17,6 +20,7 @@ export type ChatRow = {
   username: string;
   body: string;
   at: string;
+  color: string;
 };
 
 export type ChatResult =
@@ -47,6 +51,39 @@ function isFounder(name: string) {
   return name.toLowerCase() === FOUNDER_ADMIN;
 }
 
+async function readProfile(
+  sql: Awaited<ReturnType<typeof getSql>>,
+  userId: string,
+): Promise<Profile | null> {
+  const rows = await sql<{ username: string; is_admin: boolean; name_color: string | null; premium_until: string | null }>`
+    select username, is_admin, name_color, premium_until from profiles where user_id = ${userId}
+  `;
+  if (!rows[0]) return null;
+  const founder = isFounder(rows[0].username);
+  let admin = rows[0].is_admin;
+  if (founder && !admin) {
+    await sql`update profiles set is_admin = true where user_id = ${userId}`;
+    admin = true;
+  }
+  const premium = !!rows[0].premium_until && new Date(rows[0].premium_until).getTime() > Date.now();
+  const stored = rows[0].name_color && /^#[0-9a-fA-F]{6}$/.test(rows[0].name_color) ? rows[0].name_color : "#ffffff";
+  return {
+    userId,
+    username: rows[0].username,
+    isAdmin: admin || founder,
+    isFounder: founder,
+    nameColor: admin || founder || premium ? stored : "#ffffff",
+    premium: premium || admin || founder,
+  };
+}
+
+async function adminNames(sql: Awaited<ReturnType<typeof getSql>>) {
+  const rows = await sql<{ username: string }>`
+    select username from profiles where is_admin = true order by lower(username)
+  `;
+  return rows.map((r) => r.username);
+}
+
 export const upsertProfile = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
   .validator((username: string) => sanitizeName(username))
@@ -56,11 +93,8 @@ export const upsertProfile = createServerFn({ method: "POST" })
       select username, is_admin from profiles where user_id = ${context.userId}
     `;
     if (existing[0]) {
-      return {
-        userId: context.userId,
-        username: existing[0].username,
-        isAdmin: existing[0].is_admin,
-      };
+      const profile = await readProfile(sql, context.userId);
+      if (profile) return profile;
     }
     let name = username || `t${context.userId.replace(/[^a-zA-Z0-9]/g, "").slice(0, 8) || "player"}`;
     if (name.length < 3) name = `trib${Math.floor(Math.random() * 900 + 100)}`;
@@ -76,25 +110,86 @@ export const upsertProfile = createServerFn({ method: "POST" })
       values (${context.userId}, ${name}, ${admin})
       on conflict (user_id) do nothing
     `;
-    const row = await sql<{ username: string; is_admin: boolean }>`
-      select username, is_admin from profiles where user_id = ${context.userId}
-    `;
-    return {
-      userId: context.userId,
-      username: row[0]?.username ?? name,
-      isAdmin: row[0]?.is_admin ?? admin,
-    };
+    const row = await readProfile(sql, context.userId);
+    return (
+      row ?? {
+        userId: context.userId,
+        username: name,
+        isAdmin: admin,
+        isFounder: isFounder(name),
+        nameColor: "#ffffff",
+        premium: admin,
+      }
+    );
   });
 
 export const getMyProfile = createServerFn({ method: "GET" })
   .middleware([authMiddleware])
   .handler(async ({ context }): Promise<Profile | null> => {
     const sql = await getSql();
-    const rows = await sql<{ username: string; is_admin: boolean }>`
-      select username, is_admin from profiles where user_id = ${context.userId}
+    const profile = await readProfile(sql, context.userId);
+    return profile;
+  });
+
+export const enterServer = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((id: string) => id.slice(0, 16))
+  .handler(async ({ context, data: id }): Promise<{ ok: true } | { ok: false; reason: "banned" | "admin" }> => {
+    const sql = await getSql();
+    const me = await readProfile(sql, context.userId);
+    if (!me) return { ok: false, reason: "admin" };
+    const ban = await sql<{ banned: boolean }>`
+      select banned from profiles where user_id = ${context.userId}
     `;
-    if (!rows[0]) return null;
-    return { userId: context.userId, username: rows[0].username, isAdmin: rows[0].is_admin };
+    if (ban[0]?.banned) return { ok: false, reason: "banned" };
+    if (id === "czar" && !me.isAdmin) return { ok: false, reason: "admin" };
+    return { ok: true };
+  });
+
+export const listAdmins = createServerFn({ method: "GET" })
+  .middleware([authMiddleware])
+  .handler(async ({ context }): Promise<string[]> => {
+    const sql = await getSql();
+    const me = await readProfile(sql, context.userId);
+    if (!me?.isFounder) return [];
+    return adminNames(sql);
+  });
+
+export const addAdmin = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((username: string) => sanitizeName(username))
+  .handler(async ({ context, data: target }): Promise<{ ok: true; admins: string[] } | { ok: false; error: "forbidden" | "missing" | "bad" }> => {
+    const sql = await getSql();
+    const me = await readProfile(sql, context.userId);
+    if (!me?.isFounder) return { ok: false, error: "forbidden" };
+    if (!target) return { ok: false, error: "bad" };
+    const rows = await sql<{ user_id: string }>`
+      select user_id from profiles where lower(username) = ${target.toLowerCase()}
+    `;
+    if (!rows[0]) return { ok: false, error: "missing" };
+    await sql`update profiles set is_admin = true where user_id = ${rows[0].user_id}`;
+    return { ok: true, admins: await adminNames(sql) };
+  });
+
+const HEX = /^#[0-9a-fA-F]{6}$/;
+
+export const setNameColor = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((color: string) => color.trim().slice(0, 7))
+  .handler(async ({ context, data: color }): Promise<{ ok: true; color: string } | { ok: false }> => {
+    if (!HEX.test(color)) return { ok: false };
+    const sql = await getSql();
+    const me = await readProfile(sql, context.userId);
+    if (!me || (!me.isAdmin && !me.premium)) return { ok: false };
+    if (!me.isAdmin && !me.isFounder && color !== "#ffffff") {
+      const paid = await sql<{ premium_until: string | null; is_admin: boolean }>`
+        select premium_until, is_admin from profiles where user_id = ${context.userId}
+      `;
+      const until = paid[0]?.premium_until ? new Date(paid[0].premium_until).getTime() : 0;
+      if (!paid[0]?.is_admin && until <= Date.now()) return { ok: false };
+    }
+    await sql`update profiles set name_color = ${color} where user_id = ${context.userId}`;
+    return { ok: true, color };
   });
 
 export const moderation = createServerFn({ method: "GET" })
@@ -123,21 +218,31 @@ export const listChat = createServerFn({ method: "GET" })
       select user_id from profiles where user_id = ${context.userId}
     `;
     if (!mine[0]) return [];
-    const rows = await sql<{ id: number; user_id: string; username: string; body: string; created_at: string }>`
-      select id, user_id, username, body, created_at
-      from chat_messages
-      order by id desc
+    const rows = await sql<{
+      id: number;
+      user_id: string;
+      username: string;
+      body: string;
+      created_at: string;
+      name_color: string | null;
+    }>`
+      select c.id, c.user_id, c.username, c.body, c.created_at, p.name_color
+      from chat_messages c
+      left join profiles p on p.user_id = c.user_id
+      order by c.id desc
       limit 40
     `;
     return rows
       .slice()
       .reverse()
+      .filter((r) => !/granted admin/i.test(r.body))
       .map((r) => ({
         id: r.id,
         userId: r.user_id,
         username: r.username,
         body: r.body,
         at: r.created_at,
+        color: r.name_color && /^#[0-9a-fA-F]{6}$/.test(r.name_color) ? r.name_color : "#ffffff",
       }));
   });
 
@@ -176,22 +281,15 @@ async function handleCommand(
   const cmd = (parts[0] ?? "").toLowerCase();
 
   if (cmd === "giveadmin") {
+    if (!isFounder(username)) return { kind: "error", message: "founder only" };
     const target = sanitizeName(parts[1] ?? "");
     if (!target) return { kind: "error", message: "/giveadmin <username>" };
-    const canGrant = admin || isFounder(username) || isFounder(target);
-    if (!canGrant) return { kind: "error", message: "no permission" };
     const rows = await sql<{ user_id: string }>`
       select user_id from profiles where lower(username) = ${target.toLowerCase()}
     `;
     if (!rows[0]) return { kind: "error", message: "player not found" };
     await sql`update profiles set is_admin = true where user_id = ${rows[0].user_id}`;
-    const note = `${username} granted admin to ${target}`;
-    const sys = "system";
-    await sql`
-      insert into chat_messages (user_id, username, body)
-      values (${userId}, ${sys}, ${note})
-    `;
-    return { kind: "admin", username: target, granted: true, message: note };
+    return { kind: "admin", username: target, granted: true, message: target };
   }
 
   if (cmd === "give") {

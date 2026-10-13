@@ -163,8 +163,8 @@ function Login() {
             </form>
             <p className="text-xs text-muted">
               {ar
-                ? "أمر الأدمن: /giveadmin sultan1v4 — الحساب sultan1v4 يصبح أدمن تلقائياً."
-                : "Admin command: /giveadmin sultan1v4 — that account is auto-admin."}
+                ? "حساب sultan1v4 هو المالك. إضافة الأدمن من قائمة اللعبة وتظهر له فقط."
+                : "sultan1v4 is the owner. Admin grants live in the game menu and only that account can see them."}
             </p>
           </>
         )}

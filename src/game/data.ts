@@ -1,8 +1,8 @@
 export const SERVERS = [
-  { id: "haven", ar: "هافن", en: "Haven", blurbAr: "بناء وبقاء هادئ", blurbEn: "Quiet survival" },
-  { id: "raid", ar: "الغارة", en: "Raid", blurbAr: "مواجهات أشد", blurbEn: "Heavier fights" },
-  { id: "peaks", ar: "القمم", en: "Peaks", blurbAr: "جبال وذهب", blurbEn: "Mountains and gold" },
-  { id: "port", ar: "الميناء", en: "Port", blurbAr: "تجمع اللاعبين", blurbEn: "Player hub" },
+  { id: "eu-1", ar: "eu-1", en: "eu-1", blurbAr: "أوروبا", blurbEn: "Europe", adminOnly: false },
+  { id: "na-1", ar: "na-1", en: "na-1", blurbAr: "أمريكا", blurbEn: "North America", adminOnly: false },
+  { id: "as-1", ar: "as-1", en: "as-1", blurbAr: "آسيا", blurbEn: "Asia", adminOnly: false },
+  { id: "czar", ar: "czar", en: "czar", blurbAr: "للأدمن فقط", blurbEn: "Admins only", adminOnly: true },
 ] as const;
 
 export type ServerId = (typeof SERVERS)[number]["id"];
@@ -163,6 +163,8 @@ export const ISLAND_R = 96;
 export const WATER_Y = 0.12;
 export const EYE = 1.62;
 
+export const NAME_COLORS = ["#ffffff", "#f2c14e", "#e23d3d", "#3ec6e0", "#7dce6a", "#d07adf"] as const;
+
 export const OUTFITS = [
   { id: 0, arm: "#6b7a4a", accent: "#c9a227" },
   { id: 1, arm: "#4a5a3a", accent: "#8a6a3a" },
@@ -237,6 +239,12 @@ export const COPY = {
     send: "إرسال",
     enterChat: "أدمن: /godmode · /staffmode · /kick اسم · /ban اسم",
     servers: "السيرفرات",
+    czarOnly: "سيرفر czar للأدمن فقط",
+    addAdmin: "إضافة أدمن",
+    adminNames: "الأدمنز",
+    adminAdded: "تمت إضافة الأدمن",
+    playerMissing: "اللاعب غير موجود",
+    founderOnly: "هذا لحساب sultan1v4 فقط",
     banned: "هذا الحساب محظور من السيرفر",
     kicked: "تم طردك من السيرفر",
     godOn: "وضع الإله: صحة لا نهائية",
@@ -248,7 +256,16 @@ export const COPY = {
     unbannedThem: "رُفع الحظر عن",
     leaveTribe: "غادرت القبيلة",
     adminBadge: "أدمن",
+    watchAd: "شاهد إعلاناً",
+    adReward: "خشب ×8",
+    adWait: "الإعلان",
+    subPrice: "اشتراك 12$ شهرياً يلون اسمك ويزيل الإعلانات",
+    subLater: "لا ترسل رقم البطاقة هنا. الدفع يتفعل لما تربط بوابة دفع.",
+    nameColor: "لون الاسم",
     kills: "قتل",
+    headshot: "ضربة رأس",
+    blocked: "صد",
+    combo: "كومبو",
     score: "نقاط",
     day: "نهار",
     dusk: "غروب",
@@ -371,6 +388,12 @@ export const COPY = {
     send: "Send",
     enterChat: "Admin: /godmode · /staffmode · /kick name · /ban name",
     servers: "Servers",
+    czarOnly: "czar is admins only",
+    addAdmin: "Add admin",
+    adminNames: "Admins",
+    adminAdded: "Admin added",
+    playerMissing: "Player not found",
+    founderOnly: "Only sultan1v4 can do this",
     banned: "This account is banned",
     kicked: "You were kicked",
     godOn: "God mode: infinite health",
@@ -382,7 +405,16 @@ export const COPY = {
     unbannedThem: "Unbanned",
     leaveTribe: "Left the tribe",
     adminBadge: "Admin",
+    watchAd: "Watch an ad",
+    adReward: "Wood ×8",
+    adWait: "Ad",
+    subPrice: "$12/month colors your name and removes ads",
+    subLater: "Do not send a card number here. Checkout connects when a payment provider is linked.",
+    nameColor: "Name color",
     kills: "Kills",
+    headshot: "Headshot",
+    blocked: "Block",
+    combo: "Combo",
     score: "Score",
     day: "Day",
     dusk: "Dusk",

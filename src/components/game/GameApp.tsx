@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type MutableRefObject, type ReactNode } from "react";
+import { useEffect, useRef, useState, type FormEvent, type MutableRefObject, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
 import {
   Box,
@@ -13,13 +13,13 @@ import {
   Volume2,
   VolumeX,
 } from "lucide-react";
-import { COPY, HOTBAR, INV_SIZE, ITEM, OUTFITS, RECIPES, SERVERS, type ItemId, type Recipe } from "@/game/data";
+import { COPY, HOTBAR, INV_SIZE, ITEM, RECIPES, SERVERS, type ItemId, type Recipe } from "@/game/data";
 import { hasSave, TribalsEngine, countItem } from "@/game/engine";
 import { loadSettings, saveSettings, type GameSettings } from "@/game/settings";
 import { t, useGameStore } from "@/game/store";
 import { UserButton } from "@/lib/auth/gates";
 import { useCurrentUserState } from "@/lib/auth/use-current-user";
-import { getMyProfile, moderation, upsertProfile, type Profile } from "@/game/online";
+import { addAdmin, enterServer, getMyProfile, listAdmins, upsertProfile, type Profile } from "@/game/online";
 import { OnlineSession } from "./OnlineSession";
 
 function fmtTime(s: number) {
@@ -71,6 +71,8 @@ export function GameApp() {
   const [profile, setProfile] = useState<Profile | null>(null);
 
   useEffect(() => {
+    const id = useGameStore.getState().serverId;
+    if (!SERVERS.some((s) => s.id === id)) useGameStore.getState().setServer("eu-1");
     useGameStore.getState().patch({ hasSave: hasSave() });
     return () => {
       engineRef.current?.stop();
@@ -96,15 +98,24 @@ export function GameApp() {
   async function begin(training: boolean, load: boolean) {
     const canvas = canvasRef.current;
     if (!canvas) return;
+    const chosen = useGameStore.getState().serverId;
+    const srv = SERVERS.find((s) => s.id === chosen);
+    if (srv?.adminOnly && !user) {
+      useGameStore.getState().toast(t().czarOnly);
+      return;
+    }
     if (user) {
       try {
-        const gate = await moderation();
-        if (gate.banned) {
-          useGameStore.getState().toast(t().banned);
+        const gate = await enterServer({ data: chosen });
+        if (!gate.ok) {
+          useGameStore.getState().toast(gate.reason === "banned" ? t().banned : t().czarOnly);
           return;
         }
       } catch {
-        /* guests and cold db still play locally */
+        if (srv?.adminOnly) {
+          useGameStore.getState().toast(t().czarOnly);
+          return;
+        }
       }
     }
     setBooting(true);
@@ -151,6 +162,8 @@ export function GameApp() {
           engine={engineRef}
           username={profile.username}
           isAdmin={profile.isAdmin}
+          nameColor={profile.nameColor}
+          canColor={profile.isAdmin || profile.premium}
           room={`tribals-${serverId}`}
         />
       )}
@@ -163,10 +176,107 @@ export function GameApp() {
           {copy.click}
         </button>
       )}
+      {screen === "playing" && <RewardAd engine={engineRef} hide={!!profile?.premium || !!profile?.isAdmin} />}
       {screen === "paused" && <PauseOverlay engine={engineRef} />}
       {screen === "dead" && <DeadOverlay engine={engineRef} />}
       {(overlay === "inventory" || overlay === "craft") && <BagOverlay engine={engineRef} />}
       {overlay === "map" && <MapOverlay />}
+    </div>
+  );
+}
+
+function FounderPanel() {
+  const lang = useGameStore((s) => s.lang);
+  const copy = COPY[lang];
+  const [name, setName] = useState("");
+  const [admins, setAdmins] = useState<string[]>([]);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    listAdmins()
+      .then(setAdmins)
+      .catch(() => setAdmins([]));
+  }, []);
+  async function onAdd(e: FormEvent) {
+    e.preventDefault();
+    const next = name.trim();
+    if (!next) return;
+    setBusy(true);
+    try {
+      const res = await addAdmin({ data: next });
+      if (!res.ok) {
+        useGameStore.getState().toast(res.error === "missing" ? copy.playerMissing : copy.founderOnly);
+      } else {
+        setAdmins(res.admins);
+        setName("");
+        useGameStore.getState().toast(`${copy.adminAdded}: ${next}`);
+      }
+    } catch {
+      useGameStore.getState().toast(copy.founderOnly);
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <form onSubmit={onAdd} className="w-full rounded-2xl border border-amber/40 bg-panel/80 p-3">
+      <p className="text-xs font-semibold text-amber">{copy.addAdmin}</p>
+      <div className="mt-2 flex gap-2">
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          className="flex-1 rounded-xl border border-line bg-raised px-3 py-2 text-sm text-foam outline-none focus:border-amber"
+          placeholder="username"
+          maxLength={20}
+        />
+        <button type="submit" disabled={busy} className="rounded-xl bg-amber px-4 py-2 text-sm font-bold text-ink disabled:opacity-60">
+          {copy.addAdmin}
+        </button>
+      </div>
+      <p className="mt-3 text-[11px] text-muted">{copy.adminNames}</p>
+      <ul className="mt-1 text-sm text-foam">
+        {admins.map((a) => (
+          <li key={a}>{a}</li>
+        ))}
+      </ul>
+    </form>
+  );
+}
+
+function RewardAd({
+  engine,
+  hide,
+}: {
+  engine: MutableRefObject<TribalsEngine | null>;
+  hide: boolean;
+}) {
+  const copy = t();
+  const [busy, setBusy] = useState(false);
+  const [cool, setCool] = useState(0);
+  useEffect(() => {
+    if (cool <= 0) return;
+    const id = window.setTimeout(() => setCool((n) => n - 1), 1000);
+    return () => window.clearTimeout(id);
+  }, [cool]);
+  if (hide) return null;
+  return (
+    <div className="pointer-events-auto absolute bottom-24 right-3 z-30 w-44 rounded-xl border border-line bg-panel/90 p-3 text-xs sm:right-5">
+      <p className="text-muted">{copy.subPrice}</p>
+      <button
+        type="button"
+        disabled={busy || cool > 0}
+        className="mt-2 w-full rounded-lg bg-amber px-2 py-2 font-bold text-ink disabled:opacity-50"
+        onClick={() => {
+          if (busy || cool > 0) return;
+          setBusy(true);
+          window.setTimeout(() => {
+            engine.current?.giveItems("wood", 8);
+            setBusy(false);
+            setCool(40);
+          }, 5000);
+        }}
+      >
+        {busy ? copy.adWait : cool > 0 ? `${cool}` : `${copy.watchAd} · ${copy.adReward}`}
+      </button>
+      <p className="mt-2 text-[10px] leading-snug text-muted">{copy.subLater}</p>
     </div>
   );
 }
@@ -185,7 +295,6 @@ function Menu({
   profile: Profile | null;
 }) {
   const lang = useGameStore((s) => s.lang);
-  const outfit = useGameStore((s) => s.outfit);
   const has = useGameStore((s) => s.hasSave);
   const serverId = useGameStore((s) => s.serverId);
   const copy = COPY[lang];
@@ -207,23 +316,6 @@ function Menu({
           </h1>
           <p className="mt-4 max-w-md text-sm leading-relaxed text-muted">{copy.tutorial}</p>
         </div>
-        <div className="flex flex-wrap gap-2">
-          {copy.outfits.map((name, i) => (
-            <button
-              key={name}
-              type="button"
-              onClick={() => useGameStore.getState().setOutfit(i)}
-              className={`rounded-lg border px-3 py-2 text-sm font-semibold transition ${
-                outfit === i
-                  ? "border-amber bg-amber text-ink"
-                  : "border-line bg-raised/80 text-foam hover:border-sand"
-              }`}
-              style={outfit === i ? undefined : { boxShadow: `inset 0 -3px 0 ${OUTFITS[i].accent}` }}
-            >
-              {name}
-            </button>
-          ))}
-        </div>
         <div>
           <p className="mb-2 text-xs font-semibold tracking-wide text-sand">{copy.servers}</p>
           <div className="flex flex-wrap gap-2">
@@ -239,7 +331,10 @@ function Menu({
                   }`}
                 >
                   <span className="block font-bold">{lang === "ar" ? srv.ar : srv.en}</span>
-                  <span className="block text-[11px] opacity-80">{lang === "ar" ? srv.blurbAr : srv.blurbEn}</span>
+                  <span className="block text-[11px] opacity-80">
+                    {lang === "ar" ? srv.blurbAr : srv.blurbEn}
+                    {srv.adminOnly ? ` · ${copy.adminBadge}` : ""}
+                  </span>
                 </button>
               );
             })}
@@ -293,6 +388,7 @@ function Menu({
                   {profile.isAdmin ? ` · ${copy.adminBadge}` : ""}
                 </span>
               )}
+              {profile?.isFounder && <FounderPanel />}
             </>
           ) : (
             <>
@@ -335,8 +431,14 @@ function Hud({
           style={{ boxShadow: `inset 0 0 120px rgba(160,20,16,${Math.min(0.55, s.hurt)})` }}
         />
       )}
-      <div className="pointer-events-none absolute left-1/2 top-1/2 z-10 -translate-x-1/2 -translate-y-1/2">
-        <Crosshair className="size-5 text-foam/80" strokeWidth={1.6} />
+      <div className="pointer-events-none absolute left-1/2 top-1/2 z-10 -translate-x-1/2 -translate-y-1/2 text-center">
+        <Crosshair className={`mx-auto size-5 ${s.hitMark > 0 ? "text-health" : "text-foam/80"}`} strokeWidth={1.6} />
+        {s.combo > 1 && (
+          <p className="mt-1 text-xs font-bold text-amber">
+            {copy.combo} ×{s.combo}
+          </p>
+        )}
+        {s.blocking && <p className="text-[11px] font-semibold text-sand">{copy.blocked}</p>}
       </div>
       <div className="absolute left-3 top-3 z-10 flex flex-col gap-2 sm:left-5 sm:top-5">
         <div className="rounded-xl border border-line bg-panel/85 px-3 py-2 backdrop-blur-sm">

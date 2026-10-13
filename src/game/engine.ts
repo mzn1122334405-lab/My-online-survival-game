@@ -38,7 +38,7 @@ type InstProps = {
   x: Float32Array;
   z: Float32Array;
   r: Float32Array;
-  vis?: THREE.Sprite[];
+  vis?: THREE.Object3D[];
 };
 
 type Creature = {
@@ -210,7 +210,11 @@ export class TribalsEngine {
   blocking = false;
   combo = 0;
   comboT = 0;
+  nameColor = "#ffffff";
   netName = "";
+  hitMark = 0;
+  private combatSend: ((msg: { t: "hit"; to: string; dmg: number; head: boolean }) => void) | null = null;
+  typing = false;
   acc = 0;
   last = 0;
   sun: THREE.DirectionalLight;
@@ -228,6 +232,7 @@ export class TribalsEngine {
   tracers: { mesh: THREE.Line; t: number }[] = [];
   tmp = new THREE.Vector3();
   tmp2 = new THREE.Vector3();
+  tmp3 = new THREE.Vector3();
   fwd = new THREE.Vector3();
   right = new THREE.Vector3();
   ray = new THREE.Raycaster();
@@ -576,8 +581,16 @@ export class TribalsEngine {
   ): InstProps {
     const tex = this.spriteTex[texName];
     const mat = tex
-      ? new THREE.SpriteMaterial({ map: tex, transparent: true, alphaTest: 0.08, depthWrite: true })
-      : new THREE.SpriteMaterial({ color: 0x3a7a38 });
+      ? new THREE.MeshStandardMaterial({
+          map: tex,
+          transparent: true,
+          alphaTest: 0.35,
+          side: THREE.DoubleSide,
+          roughness: 0.86,
+          metalness: 0,
+        })
+      : new THREE.MeshStandardMaterial({ color: 0x3a7a38 });
+    const geo = new THREE.PlaneGeometry(1, 1);
     const dummyGeo = new THREE.BoxGeometry(0.15, 0.15, 0.15);
     const mesh = new THREE.InstancedMesh(dummyGeo, this.woodMat, n);
     mesh.visible = false;
@@ -590,18 +603,32 @@ export class TribalsEngine {
     const xs = new Float32Array(n);
     const zs = new Float32Array(n);
     const rs = new Float32Array(n);
-    const vis: THREE.Sprite[] = [];
+    const vis: THREE.Object3D[] = [];
     let k = 0;
     for (let i = 0; i < n * 10 && k < n; i++) {
       const p = place();
       if (!p) continue;
-      const spr = new THREE.Sprite(mat);
-      spr.center.set(0.5, 0);
+      const group = new THREE.Group();
       const jitter = 0.85 + this.rng() * 0.35;
-      spr.scale.set(w * jitter, h * jitter, 1);
-      spr.position.set(p.x, this.sample(p.x, p.z), p.z);
-      this.scene.add(spr);
-      vis[k] = spr;
+      group.scale.set(w * jitter, h * jitter, w * jitter);
+      for (let a = 0; a < 3; a++) {
+        const card = new THREE.Mesh(geo, mat);
+        card.position.y = 0.5;
+        card.rotation.y = (a * Math.PI) / 3;
+        group.add(card);
+      }
+      if (kind === "tree") {
+        const trunk = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.035, 0.05, 0.42, 6),
+          this.woodMat,
+        );
+        trunk.position.y = 0.2;
+        group.add(trunk);
+      }
+      group.position.set(p.x, this.sample(p.x, p.z), p.z);
+      group.rotation.y = this.rng() * Math.PI;
+      this.scene.add(group);
+      vis[k] = group;
       hp[k] = p.hp;
       max[k] = p.hp;
       drop[k] = p.drop;
@@ -680,51 +707,103 @@ export class TribalsEngine {
   }
 
   private body(kind: Creature["kind"]) {
-    const g = new THREE.Group();
-    const key = kind === "goat" ? "deer" : kind;
-    const tex = this.spriteTex[key] ?? this.spriteTex.scout;
-    const sizes: Record<string, [number, number]> = {
-      deer: [1.85, 1.7],
-      goat: [1.6, 1.5],
-      boar: [1.9, 1.45],
-      wolf: [1.8, 1.55],
-      bear: [2.35, 1.95],
-      basic: [1.15, 2.05],
-      armed: [1.2, 2.1],
-      sniper: [1.15, 2.05],
-      boss: [1.45, 2.25],
-    };
-    const [w, h] = sizes[kind] ?? [1.4, 1.8];
-    if (tex) {
-      const spr = new THREE.Sprite(
-        new THREE.SpriteMaterial({ map: tex, transparent: true, alphaTest: 0.08, depthWrite: true }),
-      );
-      spr.center.set(0.5, 0);
-      spr.scale.set(w, h, 1);
-      g.add(spr);
-    } else {
-      const m = new THREE.Mesh(
-        new THREE.CapsuleGeometry(0.22, 0.7, 3, 6),
-        new THREE.MeshStandardMaterial({ color: 0x6a5a3a }),
-      );
-      m.position.y = 0.7;
-      g.add(m);
-    }
-    return g;
+    return this.makeRig(kind);
   }
 
   private playerPawn() {
+    return this.makeRig("scout");
+  }
+
+  private makeRig(kind: string) {
+    const quad = kind === "deer" || kind === "goat" || kind === "boar" || kind === "wolf" || kind === "bear";
+    const key = kind === "goat" ? "deer" : kind === "scout" ? "scout" : kind;
+    const tex = this.spriteTex[key] ?? this.spriteTex.scout;
+    const tint =
+      kind === "wolf" ? 0x8d8882 : kind === "bear" ? 0x5a4030 : kind === "boar" ? 0x7a5340 : kind === "deer" || kind === "goat" ? 0xa07848 : 0x6e5848;
+    const mat = new THREE.MeshStandardMaterial({
+      map: tex ?? null,
+      color: 0xffffff,
+      roughness: 0.78,
+      metalness: 0.02,
+    });
+    const skin = new THREE.MeshStandardMaterial({ color: tint, roughness: 0.84 });
     const g = new THREE.Group();
-    const tex = this.spriteTex.scout ?? this.spriteTex.basic;
-    if (tex) {
-      const spr = new THREE.Sprite(
-        new THREE.SpriteMaterial({ map: tex, transparent: true, alphaTest: 0.08, depthWrite: true }),
-      );
-      spr.center.set(0.5, 0);
-      spr.scale.set(1.15, 2.05, 1);
-      g.add(spr);
+    const legs: THREE.Object3D[] = [];
+    const s = kind === "bear" ? 1.28 : kind === "boar" ? 1.05 : kind === "goat" ? 0.82 : kind === "wolf" ? 0.95 : 1;
+    if (quad) {
+      const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.2 * s, 0.62 * s, 3, 7), mat);
+      body.rotation.x = Math.PI / 2;
+      body.position.y = 0.78 * s;
+      body.castShadow = false;
+      g.add(body);
+      const head = new THREE.Mesh(new THREE.SphereGeometry(0.16 * s, 8, 6), mat);
+      head.position.set(0, 0.98 * s, 0.42 * s);
+      g.add(head);
+      const snout = new THREE.Mesh(new THREE.BoxGeometry(0.1 * s, 0.08 * s, 0.16 * s), skin);
+      snout.position.set(0, 0.9 * s, 0.56 * s);
+      g.add(snout);
+      for (const [x, z] of [
+        [-0.14, 0.24],
+        [0.14, 0.24],
+        [-0.14, -0.22],
+        [0.14, -0.22],
+      ] as const) {
+        const pivot = new THREE.Group();
+        pivot.position.set(x * s, 0.72 * s, z * s);
+        const leg = new THREE.Mesh(new THREE.CapsuleGeometry(0.045 * s, 0.36 * s, 2, 5), skin);
+        leg.position.y = -0.24 * s;
+        pivot.add(leg);
+        g.add(pivot);
+        legs.push(pivot);
+      }
+      g.userData.body = body;
+      g.userData.bodyY = body.position.y;
+    } else {
+      const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.18, 0.46, 3, 7), mat);
+      body.position.y = 1.05;
+      g.add(body);
+      const head = new THREE.Mesh(new THREE.SphereGeometry(0.15, 8, 6), mat);
+      head.position.y = 1.55;
+      g.add(head);
+      for (const x of [-0.11, 0.11]) {
+        const pivot = new THREE.Group();
+        pivot.position.set(x, 0.9, 0);
+        const leg = new THREE.Mesh(new THREE.CapsuleGeometry(0.055, 0.4, 2, 5), skin);
+        leg.position.y = -0.3;
+        pivot.add(leg);
+        g.add(pivot);
+        legs.push(pivot);
+      }
+      for (const x of [-0.26, 0.26]) {
+        const pivot = new THREE.Group();
+        pivot.position.set(x, 1.28, 0);
+        const arm = new THREE.Mesh(new THREE.CapsuleGeometry(0.04, 0.3, 2, 5), skin);
+        arm.position.y = -0.2;
+        pivot.add(arm);
+        g.add(pivot);
+        legs.push(pivot);
+      }
+      g.userData.body = body;
+      g.userData.bodyY = 1.05;
     }
+    g.userData.legs = legs;
+    g.userData.phase = Math.random() * 6;
     return g;
+  }
+
+  private stepRig(mesh: THREE.Object3D, dt: number, moving: boolean) {
+    const legs = mesh.userData.legs as THREE.Object3D[] | undefined;
+    if (!legs) return;
+    let phase = (mesh.userData.phase as number) ?? 0;
+    phase += dt * (moving ? 8.5 : 1.4);
+    mesh.userData.phase = phase;
+    const amp = moving ? 0.62 : 0.06;
+    legs.forEach((leg, i) => {
+      leg.rotation.x = Math.sin(phase + (i % 2) * Math.PI) * amp;
+    });
+    const body = mesh.userData.body as THREE.Object3D | undefined;
+    const base = mesh.userData.bodyY as number | undefined;
+    if (body && typeof base === "number") body.position.y = base + Math.sin(phase * 2) * (moving ? 0.035 : 0.008);
   }
 
   private spawnFauna() {
@@ -754,13 +833,7 @@ export class TribalsEngine {
       "wolf",
       "bear",
       "bear",
-      "basic",
-      "basic",
-      "basic",
-      "armed",
-      "armed",
-      "sniper",
-      "boss",
+      "bear",
     ];
     if (this.training) {
       kinds.splice(0, kinds.length, "deer", "deer", "deer", "boar", "wolf");
@@ -788,9 +861,9 @@ export class TribalsEngine {
         y = this.sample(x, z);
         if (y > 0.8) break;
       }
-      if (kind === "boss") {
-        x = 6;
-        z = -8;
+      if (kind === "bear") {
+        x = 18;
+        z = -24;
         y = this.sample(x, z);
       }
       const mesh = this.body(kind);
@@ -1054,6 +1127,7 @@ export class TribalsEngine {
     }
     this.session += dt;
     this.handleUiKeys();
+    if (this.typing) this.input.flush();
     const blocked = this.overlay !== "none";
     const act = this.input.sample();
     if (!blocked) this.simulate(dt, act);
@@ -1071,6 +1145,7 @@ export class TribalsEngine {
   }
 
   private handleUiKeys() {
+    if (this.typing) return;
     if (this.pressed("Escape")) {
       if (this.overlay !== "none") this.setOverlay("none");
       else {
@@ -1085,7 +1160,6 @@ export class TribalsEngine {
     }
     if (this.pressed("KeyC")) this.setOverlay(this.overlay === "craft" ? "none" : "craft");
     if (this.pressed("KeyB")) this.setOverlay(this.overlay === "craft" ? "none" : "craft");
-    if (this.pressed("KeyT")) this.setOverlay(this.overlay === "chat" ? "none" : "chat");
     if (this.pressed("KeyM")) this.setOverlay(this.overlay === "map" ? "none" : "map");
     for (let i = 1; i <= 8; i++) {
       if (this.pressed(`Digit${i}`)) useGameStore.getState().patch({ hotIndex: i - 1 });
@@ -1117,6 +1191,28 @@ export class TribalsEngine {
 
   setNetName(name: string) {
     this.netName = name;
+  }
+
+  setNameColor(color: string) {
+    this.nameColor = /^#[0-9a-fA-F]{6}$/.test(color) ? color : "#ffffff";
+  }
+
+  setCombatSend(fn: ((msg: { t: "hit"; to: string; dmg: number; head: boolean }) => void) | null) {
+    this.combatSend = fn;
+  }
+
+  applyIncoming(n: number, head: boolean) {
+    const dmg = Math.max(1, Math.min(90, n));
+    this.damage(dmg, true);
+    if (head) useGameStore.getState().toast(t().headshot);
+  }
+
+  setTyping(v: boolean) {
+    this.typing = v;
+    if (v) {
+      this.input.flush();
+      if (document.pointerLockElement) document.exitPointerLock();
+    }
   }
 
   setAdmin(v: boolean) {
@@ -1152,6 +1248,7 @@ export class TribalsEngine {
       yaw: this.yaw,
       hp: this.health,
       name: this.netName,
+      color: this.nameColor,
     };
   }
 
@@ -1164,12 +1261,14 @@ export class TribalsEngine {
 
   syncRemote(
     id: string,
-    s: { x: number; y: number; z: number; yaw: number; hp: number; name: string },
+    s: { x: number; y: number; z: number; yaw: number; hp: number; name: string; color?: string },
   ) {
     let r = this.remotes.get(id);
+    const color = s.color && /^#[0-9a-fA-F]{6}$/.test(s.color) ? s.color : "#ffffff";
     if (!r) {
       const mesh = this.playerPawn();
-      mesh.add(this.makeNameTag(s.name || id));
+      mesh.add(this.makeNameTag(s.name || id, color));
+      mesh.userData.color = color;
       this.scene.add(mesh);
       r = {
         id,
@@ -1181,6 +1280,12 @@ export class TribalsEngine {
         radius: 0.45,
       };
       this.remotes.set(id, r);
+    } else if (r.name !== s.name || r.mesh.userData.color !== color) {
+      const old = r.mesh.children.find((c) => c.userData.tag);
+      if (old) r.mesh.remove(old);
+      r.mesh.add(this.makeNameTag(s.name || id, color));
+      r.mesh.userData.color = color;
+      r.name = s.name;
     }
     r.pos.set(s.x, s.y, s.z);
     r.yaw = s.yaw;
@@ -1188,6 +1293,7 @@ export class TribalsEngine {
     r.mesh.position.lerp(r.pos, 0.45);
     r.mesh.position.y = s.y;
     r.mesh.rotation.y = s.yaw;
+    this.stepRig(r.mesh, 0.07, true);
   }
 
   dropRemote(id: string) {
@@ -1204,15 +1310,14 @@ export class TribalsEngine {
     }
   }
 
-  private makeNameTag(name: string) {
+  private makeNameTag(name: string, color = "#ffffff") {
     const c = document.createElement("canvas");
     c.width = 256;
     c.height = 64;
     const ctx = c.getContext("2d");
     if (ctx) {
-      ctx.fillStyle = "rgba(7,16,24,0.72)";
-      ctx.fillRect(0, 0, 256, 64);
-      ctx.fillStyle = "#e8e0d4";
+      ctx.clearRect(0, 0, 256, 64);
+      ctx.fillStyle = color;
       ctx.font = "700 28px Cairo, sans-serif";
       ctx.textAlign = "center";
       ctx.fillText(name.slice(0, 16), 128, 42);
@@ -1221,6 +1326,8 @@ export class TribalsEngine {
     const spr = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false }));
     spr.scale.set(1.5, 0.38, 1);
     spr.position.y = 2.15;
+    spr.userData.tag = true;
+    spr.userData.color = color;
     return spr;
   }
 
@@ -1237,14 +1344,15 @@ export class TribalsEngine {
 
     const sprint = act.sprint && this.stamina > 4 && act.moveY > 0;
     const speed = sprint ? 7.4 : 4.35;
+    this.blocking = act.block && this.dodgeT <= 0 && this.stamina > 4;
     if (sprint) this.stamina = Math.max(0, this.stamina - 18 * dt);
-    else this.stamina = Math.min(100, this.stamina + 22 * dt);
+    else if (!this.blocking) this.stamina = Math.min(100, this.stamina + 22 * dt);
+    if (this.blocking) this.stamina = Math.max(0, this.stamina - 12 * dt);
 
     const wish = this.tmp.set(0, 0, 0);
     wish.addScaledVector(this.fwd, act.moveY);
     wish.addScaledVector(this.right, act.moveX);
     if (wish.lengthSq() > 1) wish.normalize();
-    this.blocking = act.block && this.dodgeT <= 0;
     if (this.blocking) wish.multiplyScalar(0.45);
     if (act.dodge && this.dodgeCd <= 0 && this.stamina > 14 && this.dodgeT <= 0) {
       this.dodgeT = 0.38;
@@ -1265,6 +1373,7 @@ export class TribalsEngine {
     this.dodgeCd = Math.max(0, this.dodgeCd - dt);
     this.comboT = Math.max(0, this.comboT - dt);
     if (this.comboT <= 0) this.combo = 0;
+    this.hitMark = Math.max(0, this.hitMark - dt * 3);
 
     const h = this.sample(this.pos.x, this.pos.z);
     const inWater = h < WATER_Y - 0.05;
@@ -1520,6 +1629,7 @@ export class TribalsEngine {
       c.yaw = Math.atan2(dirx, dirz);
       c.mesh.position.copy(c.pos);
       c.mesh.rotation.y = c.yaw;
+      this.stepRig(c.mesh, dt, c.state !== "attack");
     }
   }
 
@@ -1609,6 +1719,16 @@ export class TribalsEngine {
             break;
           }
         }
+        if (!hit) {
+          for (const r of this.remotes.values()) {
+            const body = this.tmp3.set(r.pos.x, r.pos.y + 1, r.pos.z);
+            if (b.mesh.position.distanceTo(body) < r.radius + 0.45) {
+              this.strikePlayer(r.id, b.dmg, b.mesh.position.y > r.pos.y + 1.45);
+              hit = true;
+              break;
+            }
+          }
+        }
       } else if (b.mesh.position.distanceTo(this.tmp.set(this.pos.x, this.pos.y + this.eye, this.pos.z)) < 0.7) {
         this.damage(b.dmg, true);
         hit = true;
@@ -1633,15 +1753,20 @@ export class TribalsEngine {
       const d = c.pos.distanceTo(p);
       if (d < 5) this.hurtCreature(c, dmg * (1 - d / 5));
     }
+    for (const r of this.remotes.values()) {
+      const d = r.pos.distanceTo(p);
+      if (d < 5) this.strikePlayer(r.id, dmg * (1 - d / 5), false);
+    }
     if (this.pos.distanceTo(p) < 5) this.damage(dmg * (1 - this.pos.distanceTo(p) / 5), true);
   }
 
-  private hurtCreature(c: Creature, dmg: number) {
+  private hurtCreature(c: Creature, dmg: number, head = false) {
     c.hp -= dmg;
     c.provoked = true;
     c.state = c.flee ? "flee" : "chase";
     this.audio.hit();
     this.flash(c.mesh);
+    this.markHit(head);
     if (c.hp <= 0) {
       c.alive = false;
       c.mesh.visible = false;
@@ -1652,6 +1777,19 @@ export class TribalsEngine {
       if (c.kind === "deer" || c.kind === "boar" || c.kind === "wolf" || c.kind === "bear" || c.kind === "goat") this.quest("hunt", 1);
       else this.quest("raid", 1);
     }
+  }
+
+  private markHit(head: boolean) {
+    this.hitMark = 1;
+    useGameStore.getState().patch({ hitMark: 1, combo: this.combo });
+    if (head) useGameStore.getState().toast(t().headshot);
+  }
+
+  private strikePlayer(id: string, dmg: number, head: boolean) {
+    const dealt = Math.max(1, Math.round(head ? dmg * 1.5 : dmg));
+    this.combatSend?.({ t: "hit", to: id, dmg: dealt, head });
+    this.audio.hit();
+    this.markHit(head);
   }
 
   private flash(obj: THREE.Object3D) {
@@ -1836,6 +1974,7 @@ export class TribalsEngine {
 
   private fireWeapon(def: (typeof ITEM)[ItemId] | null, origin: THREE.Vector3, look: THREE.Vector3) {
     const kind = def?.kind ?? "melee";
+    if (kind !== "gun" && kind !== "bow" && kind !== "throw" && this.stamina < 6) return;
     const dmg = def?.damage ?? 10;
     this.swing = 1;
     this.fireCd = def?.cooldown ?? 0.45;
@@ -1861,6 +2000,7 @@ export class TribalsEngine {
       this.audio.swing();
     } else {
       this.audio.swing();
+      this.stamina = Math.max(0, this.stamina - 8);
       this.combo = (this.combo % 3) + 1;
       this.comboT = 0.7;
       const mult = this.combo === 3 ? 1.75 : this.combo === 2 ? 1.25 : 1;
@@ -1869,22 +2009,40 @@ export class TribalsEngine {
   }
 
   private hitscan(origin: THREE.Vector3, dir: THREE.Vector3, dmg: number, range: number) {
-    let hitC: Creature | null = null;
     let best = range;
+    let hitC: Creature | null = null;
+    let hitRemote: RemotePawn | null = null;
     let head = false;
+    const wide = range < 8 ? 0.55 : 0.28;
     for (const c of this.creatures) {
       if (!c.alive) continue;
-      const to = this.tmp.copy(c.pos).add(this.tmp2.set(0, 0.8, 0)).sub(origin);
+      const center = this.tmp3.set(c.pos.x, c.pos.y + 0.85, c.pos.z);
+      const to = this.tmp.copy(center).sub(origin);
       const t = to.dot(dir);
-      if (t < 0 || t > best) continue;
+      if (t < 0.2 || t > best) continue;
       const closest = origin.clone().addScaledVector(dir, t);
-      if (closest.distanceTo(c.pos.clone().setY(c.pos.y + 0.8)) < c.radius + 0.35) {
+      if (closest.distanceTo(center) < c.radius + wide) {
         best = t;
         hitC = c;
+        hitRemote = null;
         head = closest.y > c.pos.y + 1.15;
       }
     }
-    if (hitC) this.hurtCreature(hitC, head ? dmg * 1.65 : dmg);
+    for (const r of this.remotes.values()) {
+      const center = this.tmp3.set(r.pos.x, r.pos.y + 1, r.pos.z);
+      const to = this.tmp.copy(center).sub(origin);
+      const t = to.dot(dir);
+      if (t < 0.2 || t > best) continue;
+      const closest = origin.clone().addScaledVector(dir, t);
+      if (closest.distanceTo(center) < r.radius + wide) {
+        best = t;
+        hitC = null;
+        hitRemote = r;
+        head = closest.y > r.pos.y + 1.4;
+      }
+    }
+    if (hitC) this.hurtCreature(hitC, head ? dmg * 1.65 : dmg, head);
+    if (hitRemote) this.strikePlayer(hitRemote.id, dmg, head);
     const geo = new THREE.BufferGeometry().setFromPoints([
       origin.clone(),
       origin.clone().addScaledVector(dir, Math.min(best, 28)),
@@ -2055,6 +2213,13 @@ export class TribalsEngine {
       this.cam.position.x += (this.rng() - 0.5) * 0.04;
       this.cam.position.y += (this.rng() - 0.5) * 0.03;
     }
+    const swayT = this.session;
+    for (const rec of this.inst) {
+      if (rec.kind !== "tree" || !rec.vis) continue;
+      for (let i = 0; i < rec.vis.length; i++) {
+        rec.vis[i].rotation.z = Math.sin(swayT * 1.2 + i) * 0.02;
+      }
+    }
 
     const ang = (this.time - 0.25) * Math.PI * 2;
     const sunDir = this.tmp.set(Math.cos(ang), Math.sin(ang), 0.25).normalize();
@@ -2167,6 +2332,9 @@ export class TribalsEngine {
       locked: this.locked,
       nearStation: this.nearStation,
       hurt: this.hurtT,
+      hitMark: this.hitMark,
+      combo: this.combo,
+      blocking: this.blocking,
       quests: { ...this.quests, axe: craftedAxe, wood: this.gathered.wood ?? this.quests.wood },
     });
   }

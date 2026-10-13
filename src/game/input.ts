@@ -111,7 +111,21 @@ export class Input {
     else this.onUnlock();
   };
 
+  flush() {
+    this.keys.clear();
+    this.fireHeld = false;
+    this.blockHeld = false;
+    this.fireClick = false;
+    this.dodgeClick = false;
+    this.jumpClick = false;
+    this.interactClick = false;
+    this.lookX = 0;
+    this.lookY = 0;
+  }
+
   private kd = (e: KeyboardEvent) => {
+    const el = e.target as HTMLElement | null;
+    if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable)) return;
     if (e.repeat) return;
     if (this.prevent.has(e.code) || /^Digit[1-8]$/.test(e.code)) e.preventDefault();
     this.keys.add(e.code);

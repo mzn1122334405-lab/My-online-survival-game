@@ -1,34 +1,39 @@
 import { useEffect, useRef, useState, type FormEvent, type MutableRefObject } from "react";
 import { MessageSquare, Users } from "lucide-react";
 import { useP2PRoom } from "@/lib/multiplayer";
-import { listChat, moderation, sendChat, type ChatRow } from "@/game/online";
-import { COPY } from "@/game/data";
+import { COPY, NAME_COLORS } from "@/game/data";
 import { useGameStore } from "@/game/store";
+import { listChat, moderation, sendChat, setNameColor, type ChatRow } from "@/game/online";
 import type { TribalsEngine } from "@/game/engine";
 
 type Props = {
   engine: MutableRefObject<TribalsEngine | null>;
   username: string;
   isAdmin: boolean;
+  nameColor: string;
+  canColor: boolean;
   room: string;
 };
 
-export function OnlineSession({ engine, username, isAdmin, room }: Props) {
+export function OnlineSession({ engine, username, isAdmin, nameColor, canColor, room }: Props) {
   const p2p = useP2PRoom({ room, name: username });
   const lang = useGameStore((s) => s.lang);
-  const overlay = useGameStore((s) => s.overlay);
   const copy = COPY[lang];
   const [chat, setChat] = useState<ChatRow[]>([]);
   const [draft, setDraft] = useState("");
-  const [live, setLive] = useState<{ from: string; body: string }[]>([]);
+  const [live, setLive] = useState<{ from: string; body: string; color: string }[]>([]);
+  const [colors, setColors] = useState<Record<string, string>>({});
   const [staff, setStaff] = useState(false);
+  const [mine, setMine] = useState(nameColor || "#ffffff");
   const inputRef = useRef<HTMLInputElement>(null);
   const bootKick = useRef<string | null>(null);
 
   useEffect(() => {
     engine.current?.setNetName(username);
     engine.current?.setAdmin(isAdmin);
-  }, [engine, username, isAdmin]);
+    engine.current?.setNameColor(mine);
+    engine.current?.setCombatSend((msg) => p2p.send(msg));
+  }, [engine, username, isAdmin, mine, p2p.send]);
 
   useEffect(() => {
     listChat()
@@ -86,7 +91,14 @@ export function OnlineSession({ engine, username, isAdmin, room }: Props) {
             yaw: (msg.yaw as number) ?? 0,
             hp: (msg.hp as number) ?? 100,
             name: String(msg.name ?? from),
+            color: typeof msg.color === "string" ? msg.color : "#ffffff",
           });
+          if (typeof msg.color === "string") {
+            setColors((prev) => (prev[from] === msg.color ? prev : { ...prev, [from]: msg.color as string }));
+          }
+        }
+        if (msg.t === "hit" && msg.to === p2p.selfId && typeof msg.dmg === "number") {
+          engine.current?.applyIncoming(msg.dmg, msg.head === true);
         }
         if (msg.t === "mod" && typeof msg.name === "string") {
           if (String(msg.name).toLowerCase() === username.toLowerCase()) {
@@ -100,10 +112,17 @@ export function OnlineSession({ engine, username, isAdmin, room }: Props) {
           engine.current?.dropRemote(from);
         }
         if (msg.t === "chat" && typeof msg.body === "string") {
-          setLive((rows) => [...rows.slice(-30), { from: String(msg.from ?? from), body: msg.body as string }]);
+          setLive((rows) => [
+            ...rows.slice(-30),
+            {
+              from: String(msg.from ?? from),
+              body: msg.body as string,
+              color: typeof msg.color === "string" ? msg.color : "#ffffff",
+            },
+          ]);
         }
       }),
-    [p2p.onMessage, engine],
+    [p2p.onMessage, p2p.selfId, engine, username, copy.banned, copy.kicked],
   );
 
   useEffect(() => {
@@ -126,8 +145,17 @@ export function OnlineSession({ engine, username, isAdmin, room }: Props) {
   }, [p2p.broadcast, engine]);
 
   useEffect(() => {
-    if (overlay === "chat") inputRef.current?.focus();
-  }, [overlay]);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.code !== "KeyT") return;
+      if (document.activeElement === inputRef.current) return;
+      if (useGameStore.getState().screen !== "playing") return;
+      if (useGameStore.getState().overlay !== "none") return;
+      e.preventDefault();
+      inputRef.current?.focus();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   async function onSend(e: FormEvent) {
     e.preventDefault();
@@ -160,8 +188,8 @@ export function OnlineSession({ engine, username, isAdmin, room }: Props) {
       } else if (res.kind === "help" || res.kind === "error") {
         useGameStore.getState().toast(res.message);
       } else {
-        p2p.send({ t: "chat", from: username, body: text });
-        setLive((rows) => [...rows.slice(-30), { from: username, body: text }]);
+        p2p.send({ t: "chat", from: username, body: text, color: mine });
+        setLive((rows) => [...rows.slice(-30), { from: username, body: text, color: mine }]);
         const latest = await listChat();
         setChat(latest);
       }
@@ -171,74 +199,87 @@ export function OnlineSession({ engine, username, isAdmin, room }: Props) {
   }
 
   const lines = [
-    ...chat.map((c) => ({ from: c.username, body: c.body, key: `d${c.id}` })),
-    ...live.map((c, i) => ({ from: c.from, body: c.body, key: `l${i}-${c.body}` })),
+    ...chat.map((c) => ({ from: c.username, body: c.body, color: c.color || "#ffffff", key: `d${c.id}` })),
+    ...live.map((c, i) => ({ from: c.from, body: c.body, color: c.color || "#ffffff", key: `l${i}-${c.body}` })),
   ].slice(-24);
   const visiblePeers = p2p.peers.filter((p) => p.name && p.name !== "__ghost");
   const connected = visiblePeers.filter((p) => p.connectionState === "connected").length;
 
   return (
-    <>
-      <div className="pointer-events-none absolute bottom-20 left-3 z-20 max-w-56 sm:left-5">
-        <div className="rounded-xl border border-line bg-panel/80 px-3 py-2 text-[11px] backdrop-blur-sm">
-          <p className="flex items-center gap-1 font-semibold text-amber">
-            <Users className="size-3" /> {copy.online} · {connected + (staff ? 0 : 1)}
-          </p>
+    <div className="pointer-events-auto absolute bottom-3 left-3 z-30 w-[min(22rem,calc(100vw-7.5rem))] sm:left-5">
+      <form onSubmit={onSend} className="rounded-2xl border border-line bg-ink/80 p-2 text-sm shadow-lg backdrop-blur-sm">
+        <div className="mb-1 flex items-center justify-between text-[11px] text-muted">
+          <span className="font-semibold text-foam">
+            <MessageSquare className="me-1 inline size-3 text-amber" />
+            {copy.chat}
+            <Users className="ms-2 me-1 inline size-3" />
+            {connected + (staff ? 0 : 1)}
+          </span>
           {!staff && (
-            <p className="truncate text-foam">
+            <span className="truncate" style={{ color: mine }}>
               {username}
               {isAdmin ? ` · ${copy.adminBadge}` : ""}
-            </p>
+            </span>
           )}
-          {staff && <p className="truncate text-amber">{copy.staffOn}</p>}
-          {visiblePeers.slice(0, 6).map((p) => (
-            <p key={p.id} className="truncate text-muted">
-              {p.name || p.id} {p.connectionState === "connected" ? "" : "…"}
+        </div>
+        <div className="max-h-28 overflow-y-auto text-xs leading-snug">
+          {lines.length === 0 && <p className="text-muted">{copy.enterChat}</p>}
+          {lines.map((l) => (
+            <p key={l.key}>
+              <span className="font-semibold" style={{ color: l.color }}>
+                {l.from}:{" "}
+              </span>
+              <span className="text-foam">{l.body}</span>
+            </p>
+          ))}
+          {visiblePeers.slice(0, 4).map((p) => (
+            <p key={p.id} className="truncate text-[10px]" style={{ color: colors[p.id] || "#ffffff" }}>
+              {p.name || p.id}
+              {p.connectionState === "connected" ? "" : " …"}
             </p>
           ))}
         </div>
-      </div>
-
-      {overlay === "chat" && (
-        <div className="absolute inset-x-0 bottom-0 z-30 flex justify-center p-3 sm:p-5">
-          <form
-            onSubmit={onSend}
-            className="flex w-full max-w-xl flex-col gap-2 rounded-2xl border border-line bg-surface/95 p-3"
-          >
-            <div className="flex items-center justify-between text-sm">
-              <span className="font-semibold">
-                <MessageSquare className="me-1 inline size-4 text-amber" />
-                {copy.chat}
-              </span>
-              <button type="button" className="text-muted" onClick={() => engine.current?.setOverlay("none")}>
-                Esc
-              </button>
-            </div>
-            <div className="max-h-40 overflow-y-auto text-sm">
-              {lines.length === 0 && <p className="text-muted">{copy.enterChat}</p>}
-              {lines.map((l) => (
-                <p key={l.key} className="leading-snug">
-                  <span className="font-semibold text-sand">{l.from}: </span>
-                  {l.body}
-                </p>
-              ))}
-            </div>
-            <div className="flex gap-2">
-              <input
-                ref={inputRef}
-                value={draft}
-                onChange={(e) => setDraft(e.target.value)}
-                className="flex-1 rounded-xl border border-line bg-raised px-3 py-2 text-sm text-foam outline-none focus:border-amber"
-                placeholder={copy.enterChat}
-                maxLength={240}
+        {canColor && (
+          <div className="mt-1 flex gap-1">
+            {NAME_COLORS.map((c) => (
+              <button
+                key={c}
+                type="button"
+                aria-label={copy.nameColor}
+                className="size-4 rounded-full border border-white/40"
+                style={{ background: c, outline: mine === c ? "2px solid #fff" : undefined }}
+                onClick={() => {
+                  setMine(c);
+                  void setNameColor({ data: c });
+                }}
               />
-              <button type="submit" className="rounded-xl bg-amber px-4 py-2 text-sm font-bold text-ink">
-                {copy.send}
-              </button>
-            </div>
-          </form>
+            ))}
+          </div>
+        )}
+        {!canColor && <p className="mt-1 text-[10px] text-muted">{copy.subPrice}</p>}
+        <div className="mt-1 flex gap-1">
+          <input
+            ref={inputRef}
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onFocus={() => engine.current?.setTyping(true)}
+            onBlur={() => engine.current?.setTyping(false)}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === "Escape") {
+                e.preventDefault();
+                e.currentTarget.blur();
+              }
+            }}
+            className="flex-1 rounded-lg border border-line bg-raised px-2 py-1.5 text-xs text-foam outline-none focus:border-amber"
+            placeholder={copy.enterChat}
+            maxLength={240}
+          />
+          <button type="submit" className="rounded-lg bg-amber px-2 py-1.5 text-xs font-bold text-ink">
+            {copy.send}
+          </button>
         </div>
-      )}
-    </>
+      </form>
+    </div>
   );
 }
