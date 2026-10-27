@@ -13,7 +13,7 @@ import {
 } from "./data";
 
 export type Screen = "menu" | "playing" | "paused" | "dead";
-export type Overlay = "none" | "inventory" | "craft" | "map" | "chat";
+export type Overlay = "none" | "inventory" | "craft" | "map" | "chat" | "lock";
 
 export type Prompt = { label: string; key: string } | null;
 
@@ -54,6 +54,7 @@ export type GameHud = {
   combo: number;
   blocking: boolean;
   serverId: ServerId;
+  lockAsk: { id: number; mode: "set" | "open" } | null;
 };
 
 type Actions = {
@@ -103,6 +104,7 @@ export const useGameStore = create<GameHud & Actions>((set, get) => ({
   combo: 0,
   blocking: false,
   serverId: SERVERS[0].id,
+  lockAsk: null,
   setLang: (lang) => set({ lang }),
   setServer: (serverId) => set({ serverId }),
   setOutfit: (outfit) => set({ outfit }),

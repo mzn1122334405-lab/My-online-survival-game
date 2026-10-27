@@ -11,6 +11,7 @@ export type Actions = {
   reload: boolean;
   dodge: boolean;
   block: boolean;
+  wheel: number;
 };
 
 export class Input {
@@ -24,6 +25,7 @@ export class Input {
   jumpClick = false;
   dodgeClick = false;
   blockHeld = false;
+  wheel = 0;
   touchMoveX = 0;
   touchMoveY = 0;
   touchLookX = 0;
@@ -70,6 +72,7 @@ export class Input {
     this.canvas.addEventListener("mousedown", this.md);
     window.addEventListener("mouseup", this.mu);
     this.canvas.addEventListener("contextmenu", this.ctx);
+    this.canvas.addEventListener("wheel", this.wh, { passive: false });
     this.canvas.addEventListener("pointerdown", this.pd);
     window.addEventListener("pointermove", this.pm);
     window.addEventListener("pointerup", this.pu);
@@ -86,6 +89,7 @@ export class Input {
     this.canvas.removeEventListener("mousedown", this.md);
     window.removeEventListener("mouseup", this.mu);
     this.canvas.removeEventListener("contextmenu", this.ctx);
+    this.canvas.removeEventListener("wheel", this.wh);
     this.canvas.removeEventListener("pointerdown", this.pd);
     window.removeEventListener("pointermove", this.pm);
     window.removeEventListener("pointerup", this.pu);
@@ -162,6 +166,10 @@ export class Input {
     if (e.button === 2) this.blockHeld = false;
   };
   private ctx = (e: Event) => e.preventDefault();
+  private wh = (e: WheelEvent) => {
+    e.preventDefault();
+    this.wheel += e.deltaY > 0 ? 1 : e.deltaY < 0 ? -1 : 0;
+  };
 
   private pd = (e: PointerEvent) => {
     if (!this.isTouch) return;
@@ -240,6 +248,8 @@ export class Input {
     this.interactClick = false;
     this.jumpClick = false;
     this.dodgeClick = false;
+    const wheel = this.wheel;
+    this.wheel = 0;
     return {
       moveX: x,
       moveY: y,
@@ -253,6 +263,7 @@ export class Input {
       reload: src.has("KeyR"),
       dodge,
       block: this.blockHeld || src.has("KeyF"),
+      wheel,
     };
   }
 }

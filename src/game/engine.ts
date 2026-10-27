@@ -1,4 +1,6 @@
 import * as THREE from "three";
+import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
+import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { createNoise2D } from "simplex-noise";
 import {
   EYE,
@@ -23,6 +25,9 @@ import { freshInventory, t, useGameStore, type Overlay } from "./store";
 const SEG = 120;
 const SIZE = WORLD_SIZE;
 const GRID = SEG + 1;
+const TILE = 2;
+const WALL_H = 3.2;
+const FLOOR_T = 0.22;
 const SAVE = "tribals-save-v1";
 const FIXED = 1 / 60;
 
@@ -44,7 +49,7 @@ type InstProps = {
 type Creature = {
   id: number;
   mesh: THREE.Object3D;
-  kind: "deer" | "boar" | "wolf" | "bear" | "goat" | "basic" | "armed" | "sniper" | "boss";
+  kind: "deer" | "boar" | "wolf" | "bear" | "goat" | "chicken" | "fish" | "crab";
   hp: number;
   max: number;
   speed: number;
@@ -68,12 +73,16 @@ type Creature = {
 type Build = {
   id: number;
   type: ItemId;
-  mesh: THREE.Mesh;
+  mesh: THREE.Object3D;
   pos: THREE.Vector3;
   rot: number;
   open?: boolean;
   hx?: number;
   hz?: number;
+  top?: number;
+  code?: string;
+  owners?: string[];
+  bottom?: number;
 };
 
 type RemotePawn = {
@@ -86,7 +95,8 @@ type RemotePawn = {
   radius: number;
 };
 
-type Drop = { mesh: THREE.Mesh; id: ItemId; n: number; life: number };
+type CaveHit = { x: number; z: number; yaw: number; hx: number; hz: number; bottom: number; top: number };
+type Drop = { mesh: THREE.Object3D; id: ItemId; n: number; life: number };
 type Bullet = {
   mesh: THREE.Mesh;
   vel: THREE.Vector3;
@@ -129,6 +139,30 @@ function addItem(inv: Slot[], id: ItemId, n: number) {
 
 function countItem(inv: Slot[], id: ItemId) {
   return inv.reduce((a, s) => a + (s && s.id === id ? s.count : 0), 0);
+}
+
+function fitInv(old: Slot[] | undefined): Slot[] {
+  const out: Slot[] = Array.from({ length: INV_SIZE + HOTBAR }, () => null);
+  if (!old?.length) return out;
+  const legacy = old.length === 48;
+  const bag = legacy ? old.slice(0, 40) : old.slice(0, Math.max(0, old.length - (old.length > INV_SIZE ? HOTBAR : 0)));
+  const hot = legacy ? old.slice(40) : old.length > INV_SIZE ? old.slice(-HOTBAR) : [];
+  const extra: Slot[] = [];
+  bag.forEach((s, i) => {
+    if (!s) return;
+    if (i < INV_SIZE) out[i] = s;
+    else extra.push(s);
+  });
+  hot.forEach((s, i) => {
+    if (!s) return;
+    if (i < HOTBAR) out[INV_SIZE + i] = s;
+    else extra.push(s);
+  });
+  for (const s of extra) {
+    const at = out.findIndex((x) => !x);
+    if (at >= 0) out[at] = s;
+  }
+  return out;
 }
 
 function takeItem(inv: Slot[], id: ItemId, n: number) {
@@ -226,6 +260,7 @@ export class TribalsEngine {
   inst: InstProps[] = [];
   creatures: Creature[] = [];
   builds: Build[] = [];
+  private caveHits: CaveHit[] = [];
   drops: Drop[] = [];
   bullets: Bullet[] = [];
   rain: THREE.Points;
@@ -254,6 +289,8 @@ export class TribalsEngine {
   textures: THREE.Texture[] = [];
   texMaps: Record<string, THREE.Texture> = {};
   spriteTex: Record<string, THREE.Texture> = {};
+  solids: Record<string, THREE.Mesh> = {};
+  windU = { value: 0 };
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -326,7 +363,7 @@ export class TribalsEngine {
     this.water = new THREE.Mesh();
     this.weapon = new THREE.Group();
     this.ghost = new THREE.Mesh(
-      new THREE.BoxGeometry(1.5, 0.35, 1.5),
+      new THREE.BoxGeometry(1, 1, 1),
       new THREE.MeshBasicMaterial({ color: 0x6db56d, transparent: true, opacity: 0.4, depthWrite: false }),
     );
     this.ghost.visible = false;
@@ -346,6 +383,7 @@ export class TribalsEngine {
     this.outfit = opts.outfit;
     this.armMat.color.set(OUTFITS[opts.outfit]?.arm ?? "#6b7a4a");
     await this.loadTextures();
+    await this.loadSolids();
     try {
       this.buildWorld();
     } catch (err) {
@@ -435,10 +473,6 @@ export class TribalsEngine {
       "boar",
       "wolf",
       "bear",
-      "basic",
-      "armed",
-      "sniper",
-      "boss",
       "scout",
     ];
     await Promise.all(
@@ -452,6 +486,79 @@ export class TribalsEngine {
         } catch (err) {
           console.warn("sprite fail", n, err);
         }
+      }),
+    );
+  }
+
+  private dress(mesh: THREE.Mesh, mode: number) {
+    const prev = mesh.material as THREE.MeshStandardMaterial;
+    const mat = new THREE.MeshStandardMaterial({
+      map: prev.map ?? null,
+      roughness: 0.82,
+      metalness: 0.03,
+      vertexColors: true,
+    });
+    const wind = this.windU;
+    mat.onBeforeCompile = (shader) => {
+      shader.uniforms.uTime = wind;
+      shader.uniforms.uMode = { value: mode };
+      shader.vertexShader = shader.vertexShader
+        .replace("#include <common>", "#include <common>\nuniform float uTime;\nuniform float uMode;")
+        .replace(
+          "#include <begin_vertex>",
+          `#include <begin_vertex>
+          if (uMode < 0.5) {
+            transformed.x += sin(uTime * 1.3 + position.y * 3.0) * position.y * position.y * 0.045;
+            transformed.z += cos(uTime * 1.05 + position.y * 2.2) * position.y * position.y * 0.03;
+          } else if (uMode < 1.5) {
+            float leg = smoothstep(0.46, 0.08, position.y);
+            float ph = uTime * 8.0 + position.z * 6.5 + step(0.0, position.x) * 3.14159;
+            transformed.z += sin(ph) * leg * 0.08;
+            transformed.y += max(sin(ph), 0.0) * leg * 0.045;
+          } else {
+            float leg = smoothstep(0.5, 0.05, position.y);
+            float ph = uTime * 8.0 + position.x * 14.0;
+            transformed.z += sin(ph) * leg * 0.1;
+            transformed.y += max(sin(ph), 0.0) * leg * 0.04;
+          }`,
+        );
+    };
+    mesh.material = mat;
+    mesh.castShadow = false;
+    mesh.receiveShadow = true;
+  }
+
+  private async loadSolids() {
+    const loader = new GLTFLoader();
+    const names = [
+      "palm",
+      "oak",
+      "pine",
+      "dead",
+      "rock_s",
+      "rock_m",
+      "rock_l",
+      "rock_gold",
+      "deer",
+      "boar",
+      "wolf",
+      "bear",
+      "scout",
+    ];
+    const modeOf = (n: string) => (n === "scout" ? 2 : n === "deer" || n === "boar" || n === "wolf" || n === "bear" ? 1 : 0);
+    await Promise.all(
+      names.map(async (n) => {
+        const gltf = await loader.loadAsync(`/models/${n}.glb`);
+        const meshes: THREE.Mesh[] = [];
+        gltf.scene.traverse((o) => {
+          const m = o as THREE.Mesh;
+          if (m.isMesh) meshes.push(m);
+        });
+        const found = meshes[0];
+        if (!found) throw new Error(`solid ${n} has no mesh`);
+        found.geometry.computeBoundingSphere();
+        this.dress(found, modeOf(n));
+        this.solids[n] = found;
       }),
     );
   }
@@ -523,8 +630,10 @@ export class TribalsEngine {
     this.scene.add(this.water);
 
     this.scatter();
+    this.placeCaves();
     this.spawnFauna();
     this.makeCamps();
+    this.placeBoats();
     this.makeRain();
   }
 
@@ -579,21 +688,9 @@ export class TribalsEngine {
     h: number,
     place: () => { hp: number; drop: ItemId; extra?: ItemId; x: number; z: number; r: number } | null,
   ): InstProps {
-    const tex = this.spriteTex[texName];
-    const mat = tex
-      ? new THREE.MeshStandardMaterial({
-          map: tex,
-          transparent: true,
-          alphaTest: 0.35,
-          side: THREE.DoubleSide,
-          roughness: 0.86,
-          metalness: 0,
-        })
-      : new THREE.MeshStandardMaterial({ color: 0x3a7a38 });
-    const geo = new THREE.PlaneGeometry(1, 1);
-    const dummyGeo = new THREE.BoxGeometry(0.15, 0.15, 0.15);
-    const mesh = new THREE.InstancedMesh(dummyGeo, this.woodMat, n);
-    mesh.visible = false;
+    const src = this.solids[texName];
+    if (!src) throw new Error(`missing solid ${texName}`);
+    const mesh = new THREE.InstancedMesh(src.geometry, src.material as THREE.Material, n);
     mesh.frustumCulled = false;
     const hp = new Float32Array(n);
     const max = new Float32Array(n);
@@ -603,32 +700,17 @@ export class TribalsEngine {
     const xs = new Float32Array(n);
     const zs = new Float32Array(n);
     const rs = new Float32Array(n);
-    const vis: THREE.Object3D[] = [];
     let k = 0;
     for (let i = 0; i < n * 10 && k < n; i++) {
       const p = place();
       if (!p) continue;
-      const group = new THREE.Group();
-      const jitter = 0.85 + this.rng() * 0.35;
-      group.scale.set(w * jitter, h * jitter, w * jitter);
-      for (let a = 0; a < 3; a++) {
-        const card = new THREE.Mesh(geo, mat);
-        card.position.y = 0.5;
-        card.rotation.y = (a * Math.PI) / 3;
-        group.add(card);
-      }
-      if (kind === "tree") {
-        const trunk = new THREE.Mesh(
-          new THREE.CylinderGeometry(0.035, 0.05, 0.42, 6),
-          this.woodMat,
-        );
-        trunk.position.y = 0.2;
-        group.add(trunk);
-      }
-      group.position.set(p.x, this.sample(p.x, p.z), p.z);
-      group.rotation.y = this.rng() * Math.PI;
-      this.scene.add(group);
-      vis[k] = group;
+      const jitter = 0.88 + this.rng() * 0.24;
+      const s = h * jitter;
+      this.dummy.position.set(p.x, this.sample(p.x, p.z), p.z);
+      this.dummy.rotation.set(0, this.rng() * Math.PI * 2, 0);
+      this.dummy.scale.set(s, s, s);
+      this.dummy.updateMatrix();
+      mesh.setMatrixAt(k, this.dummy.matrix);
       hp[k] = p.hp;
       max[k] = p.hp;
       drop[k] = p.drop;
@@ -640,154 +722,402 @@ export class TribalsEngine {
       k++;
     }
     mesh.count = k;
-    const rec: InstProps = { mesh, kind, hp, max, drop, extra, alive, x: xs, z: zs, r: rs, vis };
+    mesh.instanceMatrix.needsUpdate = true;
+    this.scene.add(mesh);
+    const rec: InstProps = { mesh, kind, hp, max, drop, extra, alive, x: xs, z: zs, r: rs };
     this.inst.push(rec);
     return rec;
   }
 
   private scatter() {
-    const tryPlace = (minH: number, maxH: number, minD: number, maxD: number) => {
-      const a = this.rng() * Math.PI * 2;
-      const d = minD + this.rng() * (maxD - minD);
-      const x = Math.cos(a) * d;
-      const z = Math.sin(a) * d;
-      const y = this.sample(x, z);
-      if (y < minH || y > maxH) return null;
-      if (x * x + (z - 86) * (z - 86) < 14 * 14) return null;
-      return { x, z, y };
+    const ring = (cx: number, cz: number, n: number, radius: number) => {
+      const out: { x: number; z: number }[] = [];
+      for (let i = 0; i < n; i++) {
+        const a = (i / n) * Math.PI * 2;
+        const d = radius * (0.5 + (i % 4) * 0.16);
+        let x = cx + Math.cos(a) * d;
+        let z = cz + Math.sin(a) * d * 0.82;
+        for (let k = 0; k < 8; k++) {
+          const y = this.sample(x, z);
+          const spawn = x * x + (z - 86) * (z - 86) < 18 * 18;
+          if (y >= 0.45 && y < 11 && !spawn) break;
+          x *= 0.88;
+          z *= 0.88;
+        }
+        out.push({ x, z });
+      }
+      return out;
+    };
+    const grove = (
+      tex: string,
+      kind: PropKind,
+      w: number,
+      h: number,
+      pts: { x: number; z: number }[],
+      hp: number,
+      drop: ItemId,
+      extra: ItemId,
+      r: number,
+    ) => {
+      let i = 0;
+      this.makeBills(tex, pts.length, kind, w, h, () => {
+        const p = pts[i++];
+        if (!p) return null;
+        return { hp, drop, extra, x: p.x, z: p.z, r };
+      });
     };
 
-    this.makeBills("palm", 36, "tree", 6.6, 10.4, () => {
-      const p = tryPlace(0.35, 3.4, 52, 94);
+    grove("oak", "tree", 7.2, 8.6, ring(-42, 22, 4, 12), 95, "wood", "fiber", 0.7);
+    grove("pine", "tree", 5.4, 9.8, ring(-30, 32, 3, 10), 85, "wood", "coal", 0.55);
+    grove("palm", "tree", 6.6, 10.4, ring(62, 46, 2, 8), 75, "wood", "fiber", 0.55);
+    grove("dead", "tree", 4.8, 8.0, ring(-50, 8, 1, 4), 50, "wood", "coal", 0.4);
+
+    grove("rock_s", "rock", 1.9, 1.45, ring(48, -38, 4, 9), 40, "stone", "coal", 0.55);
+    grove("rock_m", "rock", 2.7, 2.1, ring(46, -28, 3, 8), 70, "stone", "iron", 0.75);
+    grove("rock_l", "rock", 3.4, 2.6, ring(54, -34, 3, 8), 95, "stone", "iron", 0.95);
+
+    grove("rock_gold", "rock", 2.4, 1.9, ring(-14, -48, 10, 10), 80, "gold", "sulfur", 0.65);
+    grove("rock_s", "rock", 1.9, 1.45, ring(30, -16, 10, 10), 55, "sulfur", "stone", 0.5);
+    grove("rock_l", "rock", 3.4, 2.6, ring(-56, -20, 10, 11), 70, "coal", "stone", 0.7);
+
+    grove("oak", "bush", 1.6, 1.35, ring(-24, 56, 10, 9), 16, "fiber", "fiber", 0.4);
+    grove("oak", "bush", 1.6, 1.35, ring(36, 6, 10, 9), 16, "herbs", "herbs", 0.4);
+    grove("oak", "bush", 1.6, 1.35, ring(-6, 46, 10, 9), 16, "berries", "berries", 0.4);
+  }
+
+  private placeCaves() {
+    const rock = new THREE.MeshStandardMaterial({ map: this.texMaps.rock, roughness: 0.96, color: 0xc8c2b4 });
+    const dark = new THREE.MeshStandardMaterial({ color: 0x2a2622, roughness: 1 });
+    const dirt = new THREE.MeshStandardMaterial({ color: 0x8a6a42, roughness: 1 });
+    const grass = new THREE.MeshStandardMaterial({ map: this.texMaps.leaves, color: 0x4e9a3a, roughness: 0.9 });
+    const mouths: { x: number; z: number; yaw: number; a: number }[] = [];
+    for (let i = 0; i < 6; i++) {
+      const a = (i / 6) * Math.PI * 2 + 0.45;
+      let x = Math.cos(a) * 70;
+      let z = Math.sin(a) * 70;
+      for (let k = 0; k < 22; k++) {
+        const y = this.sample(x, z);
+        const spawn = x * x + (z - 86) * (z - 86) < 26 * 26;
+        if (y > 0.7 && y < 3.6 && !spawn) break;
+        if (spawn || y > 3.6) {
+          x = Math.cos(a + 0.2) * (66 - k * 0.6);
+          z = Math.sin(a + 0.2) * (66 - k * 0.6);
+        } else {
+          x *= 0.96;
+          z *= 0.96;
+        }
+      }
+      mouths.push({ x, z, yaw: Math.atan2(-x, -z), a });
+    }
+    const irons: { x: number; z: number }[] = [];
+    const toWorld = (ox: number, oz: number, yaw: number, lx: number, lz: number) => {
+      const c = Math.cos(yaw);
+      const s = Math.sin(yaw);
+      return { x: ox + lx * c + lz * s, z: oz - lx * s + lz * c };
+    };
+    for (const m of mouths) {
+      const g = new THREE.Group();
+      const y = Math.max(this.sample(m.x, m.z), 0.4);
+      const box = (w: number, h: number, d: number, px: number, py: number, pz: number, mat: THREE.Material, ry = 0) => {
+        const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+        mesh.position.set(px, py, pz);
+        mesh.rotation.y = ry;
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        g.add(mesh);
+      };
+      box(8.5, 0.18, 12.5, 0, 0.08, -5.2, dirt);
+      box(1.3, 5.4, 11, -3.15, 2.7, -5, rock);
+      box(1.3, 5.4, 3.2, 3.15, 2.7, -1.4, rock);
+      box(1.3, 5.4, 3.4, 3.15, 2.7, -8.6, rock);
+      box(4.6, 5.2, 1.3, 5.4, 2.6, -5.6, rock);
+      box(3.4, 5.2, 1.2, 5.2, 2.6, -3.2, rock);
+      box(3.2, 5.2, 1.2, 5.2, 2.6, -8, rock);
+      box(1.15, 4.6, 1.3, -1.7, 2.3, -11.1, rock);
+      box(1.15, 4.6, 1.3, 1.7, 2.3, -11.1, rock);
+      box(4.6, 1.3, 1.3, 0, 4.5, -11.1, rock);
+      box(7.6, 1.15, 4.2, 0, 4.55, -1.8, rock);
+      box(7.6, 1.15, 3.4, 0, 4.55, -8.4, rock);
+      box(2.2, 1.15, 3.2, -1.7, 4.55, -5.1, rock);
+      box(2.2, 1.15, 3.2, 1.7, 4.55, -5.1, rock);
+      box(2.4, 3.4, 2.2, -2.4, 1.7, 0.7, rock, 0.15);
+      box(2.6, 3.6, 2.4, 2.5, 1.8, 0.6, rock, -0.2);
+      box(3.2, 1.5, 2.6, 0.2, 4.1, 0.4, rock);
+      box(3.4, 2.2, 2.8, -4.2, 2.4, -2.2, rock, 0.4);
+      box(3.2, 2.6, 2.6, 4.6, 2.2, -1.2, rock, -0.35);
+      box(3.6, 2.4, 3, -3.6, 2.6, -8.5, rock, 0.25);
+      box(3.4, 2.8, 2.8, 4.4, 2.3, -9.2, rock, -0.3);
+      box(4.2, 1.6, 3.2, 0.4, 5.1, -4.8, rock);
+      box(2.2, 0.7, 2.2, -1.6, 5.5, -3.2, grass);
+      box(1.8, 0.55, 1.6, 1.8, 5.45, -6.6, grass);
+      box(1.4, 0.45, 1.2, -0.4, 5.7, -7.4, grass);
+      box(1.6, 0.9, 1.4, 6.2, 1.2, -5.6, rock);
+      box(1.2, 0.7, 1.1, -1.4, 0.45, -6.4, rock);
+      box(0.9, 0.55, 0.8, 2.2, 0.4, -7.2, dark);
+      const lamp = new THREE.PointLight(0xfff1d2, 0.55, 14, 2);
+      lamp.position.set(0.2, 3.2, -5.2);
+      g.add(lamp);
+      g.position.set(m.x, y, m.z);
+      g.rotation.y = m.yaw;
+      this.scene.add(g);
+      const hit = (hx: number, hz: number, lx: number, lz: number, top: number) => {
+        const w = toWorld(m.x, m.z, m.yaw, lx, lz);
+        this.caveHits.push({ x: w.x, z: w.z, yaw: m.yaw, hx, hz, bottom: y, top: y + top });
+      };
+      hit(1.15, 5.4, -3.15, -5, 5.2);
+      hit(1.15, 1.5, 3.15, -1.4, 5.2);
+      hit(1.15, 1.6, 3.15, -8.6, 5.2);
+      hit(2.2, 1.1, 5.4, -5.6, 5);
+      hit(1.5, 1.1, 5.2, -3.2, 5);
+      hit(1.5, 1.1, 5.2, -8, 5);
+      hit(1.05, 0.7, -1.7, -11.1, 4.4);
+      hit(1.05, 0.7, 1.7, -11.1, 4.4);
+      const deep = toWorld(m.x, m.z, m.yaw, -0.8, -6.2);
+      const side = toWorld(m.x, m.z, m.yaw, 4.2, -5.6);
+      irons.push(deep, side);
+    }
+    let n = 0;
+    this.makeBills("rock_m", irons.length, "rock", 1.7, 1.25, () => {
+      const p = irons[n++];
       if (!p) return null;
-      return { hp: 75, drop: "wood" as ItemId, extra: "fiber", x: p.x, z: p.z, r: 0.55 };
+      return { hp: 80, drop: "iron", extra: "stone", x: p.x, z: p.z, r: 0.55 };
     });
-    this.makeBills("oak", 48, "tree", 7.2, 8.6, () => {
-      const p = tryPlace(1.4, 8.2, 8, 72);
-      if (!p) return null;
-      return { hp: 95, drop: "wood" as ItemId, extra: "fiber", x: p.x, z: p.z, r: 0.7 };
-    });
-    this.makeBills("pine", 32, "tree", 5.4, 9.8, () => {
-      const p = tryPlace(6.2, 14, 4, 44);
-      if (!p) return null;
-      return { hp: 85, drop: "wood" as ItemId, extra: "coal", x: p.x, z: p.z, r: 0.55 };
-    });
-    this.makeBills("dead", 14, "tree", 4.8, 8.0, () => {
-      const p = tryPlace(4, 12, 10, 80);
-      if (!p) return null;
-      return { hp: 50, drop: "wood" as ItemId, extra: "coal", x: p.x, z: p.z, r: 0.4 };
-    });
-    this.makeBills("rock_s", 28, "rock", 1.9, 1.45, () => {
-      const p = tryPlace(0.3, 12, 8, 94);
-      if (!p) return null;
-      return { hp: 40, drop: "stone" as ItemId, extra: "coal", x: p.x, z: p.z, r: 0.55 };
-    });
-    this.makeBills("rock_m", 22, "rock", 2.7, 2.1, () => {
-      const p = tryPlace(0.4, 11, 10, 90);
-      if (!p) return null;
-      return { hp: 70, drop: "stone" as ItemId, extra: "iron", x: p.x, z: p.z, r: 0.75 };
-    });
-    this.makeBills("rock_l", 16, "rock", 3.4, 2.6, () => {
-      const p = tryPlace(1.0, 12, 12, 86);
-      if (!p) return null;
-      return { hp: 95, drop: "stone" as ItemId, extra: "iron", x: p.x, z: p.z, r: 0.95 };
-    });
-    this.makeBills("rock_gold", 10, "rock", 2.4, 1.9, () => {
-      const p = tryPlace(5.5, 14, 6, 50);
-      if (!p) return null;
-      return { hp: 80, drop: "gold" as ItemId, extra: "sulfur", x: p.x, z: p.z, r: 0.65 };
-    });
-    this.makeBills("oak", 34, "bush", 1.6, 1.35, () => {
-      const p = tryPlace(0.6, 5.2, 18, 88);
-      if (!p) return null;
-      const roll = this.rng();
-      const drop: ItemId = roll > 0.55 ? "berries" : roll > 0.25 ? "fiber" : "herbs";
-      return { hp: 16, drop, x: p.x, z: p.z, r: 0.45 };
-    });
+  }
+
+  private collideCaves() {
+    const pr = 0.4;
+    for (const b of this.caveHits) {
+      const dx = this.pos.x - b.x;
+      const dz = this.pos.z - b.z;
+      const ca = Math.cos(-b.yaw);
+      const sa = Math.sin(-b.yaw);
+      const lx = dx * ca - dz * sa;
+      const lz = dx * sa + dz * ca;
+      const px = Math.max(-b.hx, Math.min(b.hx, lx));
+      const pz = Math.max(-b.hz, Math.min(b.hz, lz));
+      const ox = lx - px;
+      const oz = lz - pz;
+      if (ox * ox + oz * oz >= pr * pr) continue;
+      if (b.bottom >= this.pos.y + 1.7) continue;
+      if (b.top <= this.pos.y + 0.05) continue;
+      const d = Math.max(0.001, Math.hypot(ox, oz));
+      const nx = ox / d;
+      const nz = oz / d;
+      const wx = nx * ca + nz * sa;
+      const wz = -nx * sa + nz * ca;
+      this.pos.x += wx * (pr - d);
+      this.pos.z += wz * (pr - d);
+    }
   }
 
   private body(kind: Creature["kind"]) {
+    if (kind === "chicken") return this.makeChicken();
+    if (kind === "fish") return this.makeFish();
+    if (kind === "crab") return this.makeCrab();
     return this.makeRig(kind);
   }
 
+  private tone(color: number, rough = 0.78) {
+    return new THREE.MeshStandardMaterial({ color, roughness: rough });
+  }
+
+  private makeScout() {
+    const g = new THREE.Group();
+    const skin = this.tone(0xc48a62, 0.68);
+    const shirt = this.tone(0x6e7c48, 0.84);
+    const pants = this.tone(0xc4a36a, 0.86);
+    const boot = this.tone(0x3d2a1c, 0.72);
+    const cap = this.tone(0x2a2a28, 0.58);
+    const pack = this.tone(0x8a623c, 0.82);
+    const vest = this.tone(0x3f4a34, 0.86);
+    const leg = (x: number) => {
+      const pivot = new THREE.Group();
+      pivot.position.set(x, 0.92, 0);
+      const thigh = new THREE.Mesh(new THREE.CapsuleGeometry(0.07, 0.28, 3, 6), pants);
+      thigh.position.y = -0.22;
+      const shin = new THREE.Mesh(new THREE.CapsuleGeometry(0.055, 0.26, 3, 6), pants);
+      shin.position.y = -0.52;
+      const foot = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.08, 0.2), boot);
+      foot.position.set(0, -0.72, 0.04);
+      pivot.add(thigh, shin, foot);
+      return pivot;
+    };
+    const left = leg(-0.11);
+    const right = leg(0.11);
+    const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.16, 0.38, 4, 8), shirt);
+    torso.position.y = 1.22;
+    const chest = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.22, 0.14), vest);
+    chest.position.set(0, 1.28, 0.07);
+    const head = new THREE.Mesh(new THREE.SphereGeometry(0.13, 10, 8), skin);
+    head.position.y = 1.62;
+    const hat = new THREE.Mesh(new THREE.CylinderGeometry(0.145, 0.15, 0.07, 10), cap);
+    hat.position.y = 1.74;
+    const brim = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.18, 0.018, 10), cap);
+    brim.position.set(0, 1.7, 0.04);
+    const bag = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.3, 0.12), pack);
+    bag.position.set(0, 1.28, -0.16);
+    const arm = (x: number) => {
+      const m = new THREE.Mesh(new THREE.CapsuleGeometry(0.05, 0.34, 3, 6), shirt);
+      m.position.set(x, 1.18, 0.02);
+      m.rotation.z = x > 0 ? -0.18 : 0.18;
+      const hand = new THREE.Mesh(new THREE.SphereGeometry(0.045, 6, 5), skin);
+      hand.position.set(x * 1.08, 0.92, 0.06);
+      return [m, hand] as const;
+    };
+    const [al, hl] = arm(-0.24);
+    const [ar, hr] = arm(0.24);
+    g.add(left, right, torso, chest, head, hat, brim, bag, al, hl, ar, hr);
+    g.userData.legs = [left, right];
+    g.userData.body = torso;
+    g.userData.bodyY = torso.position.y;
+    return g;
+  }
+
+  private makeChicken() {
+    const g = new THREE.Group();
+    const body = new THREE.Mesh(new THREE.SphereGeometry(0.16, 8, 6), this.tone(0xd8d2c4, 0.7));
+    body.scale.set(1.15, 0.85, 1.35);
+    body.position.y = 0.28;
+    const neck = new THREE.Mesh(new THREE.SphereGeometry(0.07, 6, 5), this.tone(0xf2efe4, 0.65));
+    neck.position.set(0, 0.4, 0.12);
+    const head = new THREE.Mesh(new THREE.SphereGeometry(0.07, 8, 6), this.tone(0xf4f1e6, 0.62));
+    head.position.set(0, 0.5, 0.16);
+    const beak = new THREE.Mesh(new THREE.ConeGeometry(0.025, 0.07, 4), this.tone(0xe2a23a, 0.5));
+    beak.rotation.x = Math.PI / 2;
+    beak.position.set(0, 0.49, 0.24);
+    const comb = new THREE.Mesh(new THREE.BoxGeometry(0.015, 0.06, 0.04), this.tone(0xc43b3b, 0.5));
+    comb.position.set(0, 0.58, 0.15);
+    const tail = new THREE.Mesh(new THREE.ConeGeometry(0.08, 0.16, 4), this.tone(0xb9b3a4, 0.7));
+    tail.rotation.x = -Math.PI / 2.4;
+    tail.position.set(0, 0.36, -0.16);
+    const leg = (x: number) => {
+      const p = new THREE.Group();
+      p.position.set(x, 0.16, 0);
+      const bone = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.012, 0.16, 4), this.tone(0xe2a23a, 0.5));
+      bone.position.y = -0.08;
+      const foot = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.015, 0.08), this.tone(0xe2a23a, 0.5));
+      foot.position.set(0, -0.16, 0.02);
+      p.add(bone, foot);
+      return p;
+    };
+    const l = leg(-0.06);
+    const r = leg(0.06);
+    g.add(body, neck, head, beak, comb, tail, l, r);
+    g.userData.legs = [l, r];
+    g.userData.body = body;
+    g.userData.bodyY = body.position.y;
+    return g;
+  }
+
+  private makeFish() {
+    const g = new THREE.Group();
+    const body = new THREE.Mesh(new THREE.SphereGeometry(0.12, 8, 6), this.tone(0x6f9db8, 0.45));
+    body.scale.set(0.55, 0.7, 1.7);
+    body.position.y = 0.12;
+    const tailP = new THREE.Group();
+    tailP.position.set(0, 0.12, -0.2);
+    const fin = new THREE.Mesh(new THREE.ConeGeometry(0.07, 0.14, 4), this.tone(0x4e7f9a, 0.5));
+    fin.rotation.x = -Math.PI / 2;
+    fin.position.z = -0.05;
+    tailP.add(fin);
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.018, 5, 4), this.tone(0x111111, 0.3));
+    eye.position.set(0.05, 0.15, 0.12);
+    g.add(body, tailP, eye);
+    g.userData.legs = [tailP];
+    g.userData.body = body;
+    g.userData.bodyY = body.position.y;
+    return g;
+  }
+
+  private makeCrab() {
+    const g = new THREE.Group();
+    const shell = new THREE.Mesh(new THREE.SphereGeometry(0.16, 8, 6), this.tone(0xb23a2e, 0.62));
+    shell.scale.set(1.3, 0.45, 1);
+    shell.position.y = 0.12;
+    const claw = (x: number) => {
+      const c = new THREE.Mesh(new THREE.SphereGeometry(0.05, 6, 5), this.tone(0xd35a42, 0.55));
+      c.scale.set(1.4, 0.7, 0.8);
+      c.position.set(x, 0.1, 0.16);
+      return c;
+    };
+    g.add(shell, claw(-0.16), claw(0.16));
+    const legs: THREE.Object3D[] = [];
+    for (const side of [-1, 1]) {
+      for (let i = 0; i < 3; i++) {
+        const p = new THREE.Group();
+        p.position.set(side * 0.12, 0.08, -0.06 + i * 0.06);
+        const bone = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.01, 0.12, 4), this.tone(0x8d2e28, 0.6));
+        bone.rotation.z = side * 0.9;
+        bone.position.x = side * 0.05;
+        p.add(bone);
+        g.add(p);
+        legs.push(p);
+      }
+    }
+    g.userData.legs = legs;
+    g.userData.body = shell;
+    g.userData.bodyY = shell.position.y;
+    return g;
+  }
+
+  private makeBoat() {
+    const g = new THREE.Group();
+    const wood = this.plankMat(0xd7b07a);
+    const hull = new THREE.Mesh(new THREE.BoxGeometry(0.86, 0.28, 2.2), wood);
+    hull.position.y = 0.16;
+    const bow = new THREE.Mesh(new THREE.ConeGeometry(0.48, 0.7, 4), wood);
+    bow.rotation.x = Math.PI / 2;
+    bow.position.set(0, 0.18, 1.25);
+    const seat = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.06, 0.28), wood);
+    seat.position.set(0, 0.32, -0.15);
+    const oar = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 1.3, 5), wood);
+    oar.rotation.z = 0.7;
+    oar.position.set(0.45, 0.4, 0.2);
+    g.add(hull, bow, seat, oar);
+    return g;
+  }
+
+  private placeBoats() {
+    const spots: [number, number][] = [
+      [72, 8],
+      [-58, 36],
+      [12, -74],
+      [-28, -62],
+    ];
+    for (const [sx, sz] of spots) {
+      let x = sx;
+      let z = sz;
+      for (let i = 0; i < 14; i++) {
+        const y = this.sample(x, z);
+        if (y < WATER_Y + 0.25 && y > WATER_Y - 0.8) break;
+        const out = y > WATER_Y ? 1 : -1;
+        x += Math.sign(x || 1) * out * 2.2;
+        z += Math.sign(z || 1) * out * 2.2;
+      }
+      const boat = this.makeBoat();
+      boat.position.set(x, WATER_Y - 0.02, z);
+      boat.rotation.y = Math.atan2(-x, -z);
+      this.scene.add(boat);
+    }
+  }
+
   private playerPawn() {
-    return this.makeRig("scout");
+    return this.makeScout();
   }
 
   private makeRig(kind: string) {
-    const quad = kind === "deer" || kind === "goat" || kind === "boar" || kind === "wolf" || kind === "bear";
-    const key = kind === "goat" ? "deer" : kind === "scout" ? "scout" : kind;
-    const tex = this.spriteTex[key] ?? this.spriteTex.scout;
-    const tint =
-      kind === "wolf" ? 0x8d8882 : kind === "bear" ? 0x5a4030 : kind === "boar" ? 0x7a5340 : kind === "deer" || kind === "goat" ? 0xa07848 : 0x6e5848;
-    const mat = new THREE.MeshStandardMaterial({
-      map: tex ?? null,
-      color: 0xffffff,
-      roughness: 0.78,
-      metalness: 0.02,
-    });
-    const skin = new THREE.MeshStandardMaterial({ color: tint, roughness: 0.84 });
+    const key = kind === "goat" ? "deer" : kind;
+    const src = this.solids[key];
     const g = new THREE.Group();
-    const legs: THREE.Object3D[] = [];
-    const s = kind === "bear" ? 1.28 : kind === "boar" ? 1.05 : kind === "goat" ? 0.82 : kind === "wolf" ? 0.95 : 1;
-    if (quad) {
-      const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.2 * s, 0.62 * s, 3, 7), mat);
-      body.rotation.x = Math.PI / 2;
-      body.position.y = 0.78 * s;
-      body.castShadow = false;
-      g.add(body);
-      const head = new THREE.Mesh(new THREE.SphereGeometry(0.16 * s, 8, 6), mat);
-      head.position.set(0, 0.98 * s, 0.42 * s);
-      g.add(head);
-      const snout = new THREE.Mesh(new THREE.BoxGeometry(0.1 * s, 0.08 * s, 0.16 * s), skin);
-      snout.position.set(0, 0.9 * s, 0.56 * s);
-      g.add(snout);
-      for (const [x, z] of [
-        [-0.14, 0.24],
-        [0.14, 0.24],
-        [-0.14, -0.22],
-        [0.14, -0.22],
-      ] as const) {
-        const pivot = new THREE.Group();
-        pivot.position.set(x * s, 0.72 * s, z * s);
-        const leg = new THREE.Mesh(new THREE.CapsuleGeometry(0.045 * s, 0.36 * s, 2, 5), skin);
-        leg.position.y = -0.24 * s;
-        pivot.add(leg);
-        g.add(pivot);
-        legs.push(pivot);
-      }
-      g.userData.body = body;
-      g.userData.bodyY = body.position.y;
-    } else {
-      const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.18, 0.46, 3, 7), mat);
-      body.position.y = 1.05;
-      g.add(body);
-      const head = new THREE.Mesh(new THREE.SphereGeometry(0.15, 8, 6), mat);
-      head.position.y = 1.55;
-      g.add(head);
-      for (const x of [-0.11, 0.11]) {
-        const pivot = new THREE.Group();
-        pivot.position.set(x, 0.9, 0);
-        const leg = new THREE.Mesh(new THREE.CapsuleGeometry(0.055, 0.4, 2, 5), skin);
-        leg.position.y = -0.3;
-        pivot.add(leg);
-        g.add(pivot);
-        legs.push(pivot);
-      }
-      for (const x of [-0.26, 0.26]) {
-        const pivot = new THREE.Group();
-        pivot.position.set(x, 1.28, 0);
-        const arm = new THREE.Mesh(new THREE.CapsuleGeometry(0.04, 0.3, 2, 5), skin);
-        arm.position.y = -0.2;
-        pivot.add(arm);
-        g.add(pivot);
-        legs.push(pivot);
-      }
-      g.userData.body = body;
-      g.userData.bodyY = 1.05;
-    }
-    g.userData.legs = legs;
-    g.userData.phase = Math.random() * 6;
+    if (!src) return g;
+    const mesh = src.clone();
+    mesh.material = (src.material as THREE.MeshStandardMaterial).clone();
+    const scale =
+      kind === "bear" ? 2.05 : kind === "boar" ? 1.32 : kind === "wolf" ? 1.48 : kind === "goat" ? 1.3 : kind === "scout" ? 1.84 : 1.68;
+    mesh.scale.setScalar(scale);
+    g.add(mesh);
+    g.userData.body = mesh;
+    g.userData.bodyY = 0;
     return g;
   }
 
@@ -833,7 +1163,22 @@ export class TribalsEngine {
       "wolf",
       "bear",
       "bear",
-      "bear",
+      "chicken",
+      "chicken",
+      "chicken",
+      "chicken",
+      "chicken",
+      "chicken",
+      "crab",
+      "crab",
+      "crab",
+      "crab",
+      "fish",
+      "fish",
+      "fish",
+      "fish",
+      "fish",
+      "fish",
     ];
     if (this.training) {
       kinds.splice(0, kinds.length, "deer", "deer", "deer", "boar", "wolf");
@@ -844,10 +1189,9 @@ export class TribalsEngine {
       boar: { hp: 70, speed: 4.6, aggro: 10, melee: 1.7, dmg: 14, flee: false, ranged: 0, radius: 0.6 },
       wolf: { hp: 55, speed: 6.2, aggro: 18, melee: 1.5, dmg: 12, flee: false, ranged: 0, radius: 0.5 },
       bear: { hp: 150, speed: 4.2, aggro: 12, melee: 2.0, dmg: 22, flee: false, ranged: 0, radius: 0.85 },
-      basic: { hp: 55, speed: 3.6, aggro: 16, melee: 1.8, dmg: 10, flee: false, ranged: 0, radius: 0.5 },
-      armed: { hp: 80, speed: 3.4, aggro: 22, melee: 1.8, dmg: 12, flee: false, ranged: 18, radius: 0.5 },
-      sniper: { hp: 60, speed: 2.8, aggro: 40, melee: 1.6, dmg: 18, flee: false, ranged: 38, radius: 0.5 },
-      boss: { hp: 240, speed: 3.5, aggro: 28, melee: 2.2, dmg: 24, flee: false, ranged: 16, radius: 0.9 },
+      chicken: { hp: 18, speed: 3.4, aggro: 8, melee: 0.8, dmg: 2, flee: true, ranged: 0, radius: 0.28 },
+      crab: { hp: 24, speed: 2.2, aggro: 6, melee: 0.9, dmg: 4, flee: true, ranged: 0, radius: 0.32 },
+      fish: { hp: 16, speed: 2.8, aggro: 7, melee: 0.7, dmg: 1, flee: true, ranged: 0, radius: 0.3 },
     };
     for (const kind of kinds) {
       let x = 0;
@@ -865,6 +1209,16 @@ export class TribalsEngine {
         x = 18;
         z = -24;
         y = this.sample(x, z);
+      } else if (kind === "fish" || kind === "crab") {
+        for (let t = 0; t < 24; t++) {
+          const a = this.rng() * Math.PI * 2;
+          const d = 30 + this.rng() * 62;
+          x = Math.cos(a) * d;
+          z = Math.sin(a) * d;
+          y = this.sample(x, z);
+          const shore = kind === "crab" ? y > WATER_Y && y < 0.7 : y < WATER_Y + 0.2 && y > WATER_Y - 1.2;
+          if (shore) break;
+        }
       }
       const mesh = this.body(kind);
       mesh.position.set(x, y, z);
@@ -897,9 +1251,6 @@ export class TribalsEngine {
   }
 
   private makeCamps() {
-    const plank = this.texMaps.planks;
-    const mat = new THREE.MeshStandardMaterial({ map: plank, roughness: 0.82 });
-    const barrelMat = new THREE.MeshStandardMaterial({ map: this.texMaps.bark, color: 0x8a6238, roughness: 0.7 });
     const spots = [
       [48, -20],
       [-40, 30],
@@ -909,8 +1260,9 @@ export class TribalsEngine {
     ];
     for (const [x, z] of spots) {
       const y = Math.max(this.sample(x, z), 0.4);
-      const floor = new THREE.Mesh(new THREE.BoxGeometry(6, 0.28, 6), mat);
-      floor.position.set(x, y + 0.14, z);
+      const floor = this.makeFoundation();
+      floor.scale.set(3, 1, 3);
+      floor.position.set(x, y + FLOOR_T / 2, z);
       this.scene.add(floor);
       this.builds.push({
         id: this.buildId++,
@@ -920,37 +1272,124 @@ export class TribalsEngine {
         rot: 0,
         hx: 3,
         hz: 3,
+        bottom: y,
+        top: y + FLOOR_T,
       });
-      for (const [dx, dz, ry] of [
-        [0, -3, 0],
-        [0, 3, 0],
-        [-3, 0, Math.PI / 2],
-      ]) {
-        const w = new THREE.Mesh(new THREE.BoxGeometry(6, 2.35, 0.22), mat);
-        w.position.set(x + (dx as number), y + 1.28, z + (dz as number));
-        w.rotation.y = ry as number;
+      const walls: [number, number, number, number, number][] = [
+        [x, z - 3, 0, 3, 0.12],
+        [x, z + 3, 0, 3, 0.12],
+        [x - 3, z, Math.PI / 2, 3, 0.12],
+        [x + 3, z - 2, -Math.PI / 2, 1, 0.12],
+        [x + 3, z + 2, -Math.PI / 2, 1, 0.12],
+      ];
+      for (const [wx, wz, rot, span, thick] of walls) {
+        const w = this.makeWall();
+        w.scale.set(span, 1, 1);
+        w.position.set(wx, y + WALL_H / 2, wz);
+        w.rotation.y = rot;
         this.scene.add(w);
         this.builds.push({
           id: this.buildId++,
           type: "wall",
           mesh: w,
-          pos: new THREE.Vector3(x + (dx as number), y, z + (dz as number)),
-          rot: ry as number,
-          hx: 3,
-          hz: 0.2,
+          pos: new THREE.Vector3(wx, y, wz),
+          rot,
+          hx: span,
+          hz: thick,
+          bottom: y,
+          top: y + WALL_H,
         });
       }
-      const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.32, 0.35, 0.7, 10), barrelMat);
-      barrel.position.set(x + 1.4, y + 0.5, z + 1.1);
-      this.scene.add(barrel);
+      const frame = this.makeFrame();
+      frame.position.set(x + 3, y + WALL_H / 2, z);
+      frame.rotation.y = -Math.PI / 2;
+      this.scene.add(frame);
+      this.builds.push({
+        id: this.buildId++,
+        type: "frame",
+        mesh: frame,
+        pos: new THREE.Vector3(x + 3, y, z),
+        rot: -Math.PI / 2,
+        hx: 1,
+        hz: 0.12,
+        bottom: y,
+        top: y + WALL_H,
+      });
+      const door = this.makeDoor(this.texMaps.planks);
+      door.position.set(x + 3, y, z);
+      door.rotation.y = -Math.PI / 2;
+      this.scene.add(door);
+      this.builds.push({
+        id: this.buildId++,
+        type: "door",
+        mesh: door,
+        pos: new THREE.Vector3(x + 3, y, z),
+        rot: -Math.PI / 2,
+        hx: 0.72,
+        hz: 0.12,
+        bottom: y,
+        top: y + 2.6,
+      });
+      const roof = this.makeRoof();
+      roof.scale.set(3.25, 1, 3.25);
+      roof.position.set(x, y + WALL_H + 0.1, z);
+      this.scene.add(roof);
+      this.builds.push({
+        id: this.buildId++,
+        type: "roof",
+        mesh: roof,
+        pos: new THREE.Vector3(x, y + WALL_H, z),
+        rot: 0,
+        hx: 3.15,
+        hz: 3.15,
+        bottom: y + WALL_H,
+        top: y + WALL_H + 0.2,
+      });
+      const crate = this.makeCrate(this.texMaps.planks);
+      crate.position.set(x - 1.1, y + FLOOR_T, z + 0.8);
+      crate.rotation.y = 0.3;
+      this.scene.add(crate);
       this.builds.push({
         id: this.buildId++,
         type: "crate",
-        mesh: barrel,
-        pos: barrel.position.clone(),
+        mesh: crate,
+        pos: new THREE.Vector3(x - 1.1, y + FLOOR_T, z + 0.8),
+        rot: 0.3,
+        hx: 0.52,
+        hz: 0.39,
+        bottom: y + FLOOR_T,
+        top: y + FLOOR_T + 0.82,
+      });
+      for (const fz of [-1.6, 1.6]) {
+        const fence = this.makeFence(this.texMaps.planks);
+        fence.position.set(x + 4.4, y, z + fz);
+        fence.rotation.y = -Math.PI / 2;
+        this.scene.add(fence);
+        this.builds.push({
+          id: this.buildId++,
+          type: "fence",
+          mesh: fence,
+          pos: new THREE.Vector3(x + 4.4, y, z + fz),
+          rot: -Math.PI / 2,
+          hx: 1,
+          hz: 0.1,
+          bottom: y,
+          top: y + 1.35,
+        });
+      }
+      const fire = this.makeCampfire();
+      fire.position.set(x + 5.6, y, z);
+      this.scene.add(fire);
+      this.builds.push({
+        id: this.buildId++,
+        type: "campfire",
+        mesh: fire,
+        pos: new THREE.Vector3(x + 5.6, y, z),
         rot: 0,
-        hx: 0.38,
-        hz: 0.38,
+        hx: 0.55,
+        hz: 0.55,
+        bottom: y,
+        top: y + 0.35,
       });
     }
   }
@@ -1130,6 +1569,11 @@ export class TribalsEngine {
     if (this.typing) this.input.flush();
     const blocked = this.overlay !== "none";
     const act = this.input.sample();
+    if (!blocked && act.wheel) {
+      const cur = useGameStore.getState().hotIndex;
+      const next = (cur + act.wheel + HOTBAR * 8) % HOTBAR;
+      useGameStore.getState().patch({ hotIndex: next });
+    }
     if (!blocked) this.simulate(dt, act);
     this.prevKeys = new Set(this.input.injected ?? this.input.keys);
     this.hudT += dt;
@@ -1161,9 +1605,7 @@ export class TribalsEngine {
     if (this.pressed("KeyC")) this.setOverlay(this.overlay === "craft" ? "none" : "craft");
     if (this.pressed("KeyB")) this.setOverlay(this.overlay === "craft" ? "none" : "craft");
     if (this.pressed("KeyM")) this.setOverlay(this.overlay === "map" ? "none" : "map");
-    for (let i = 1; i <= 8; i++) {
-      if (this.pressed(`Digit${i}`)) useGameStore.getState().patch({ hotIndex: i - 1 });
-    }
+    if (useGameStore.getState().hotIndex >= HOTBAR) useGameStore.getState().patch({ hotIndex: 0 });
     const slot = this.held();
     const id = slot?.id ?? "fists";
     if (this.weapon.userData.id !== id) {
@@ -1375,9 +1817,10 @@ export class TribalsEngine {
     if (this.comboT <= 0) this.combo = 0;
     this.hitMark = Math.max(0, this.hitMark - dt * 3);
 
-    const h = this.sample(this.pos.x, this.pos.z);
-    const inWater = h < WATER_Y - 0.05;
-    const targetY = Math.max(h, inWater ? WATER_Y - 0.9 : h);
+    const h = this.supportY(this.pos.x, this.pos.z);
+    const terrain = this.sample(this.pos.x, this.pos.z);
+    const inWater = terrain < WATER_Y - 0.05 && h < WATER_Y + 0.2;
+    const targetY = inWater ? Math.max(h, WATER_Y - 0.9) : h;
     if (this.pos.y <= targetY + 0.08) {
       this.onGround = true;
       this.pos.y = targetY;
@@ -1410,6 +1853,7 @@ export class TribalsEngine {
       this.pos.y += this.vel.y * sdt;
       this.collideProps();
       this.collideBuilds();
+      this.collideCaves();
       this.collideMobs(0.4);
       this.collideRemotes(0.4);
       const ground = this.sample(this.pos.x, this.pos.z);
@@ -1417,6 +1861,12 @@ export class TribalsEngine {
         this.pos.x = ox;
         this.pos.z = oz;
       }
+    }
+    const landed = this.supportY(this.pos.x, this.pos.z);
+    if (landed > this.pos.y && landed - this.pos.y <= 0.95) {
+      this.pos.y = landed;
+      this.vel.y = 0;
+      this.onGround = true;
     }
 
     const moving = Math.hypot(this.vel.x, this.vel.z);
@@ -1502,29 +1952,39 @@ export class TribalsEngine {
 
   private collideBuilds() {
     const pr = 0.4;
+    const step = 0.95;
     for (const b of this.builds) {
       if (b.type === "door" && b.open) continue;
-      const hx = b.hx ?? (b.type === "foundation" || b.type === "roof" ? 0.85 : 0.25);
-      const hz = b.hz ?? (b.type === "wall" || b.type === "window" || b.type === "door" ? 0.2 : 0.85);
+      const hx = b.hx ?? (b.type === "foundation" || b.type === "roof" ? TILE / 2 : 0.25);
+      const hz = b.hz ?? (b.type === "wall" || b.type === "window" || b.type === "door" ? 0.12 : TILE / 2);
       const dx = this.pos.x - b.pos.x;
       const dz = this.pos.z - b.pos.z;
       const ca = Math.cos(-b.rot);
       const sa = Math.sin(-b.rot);
       const lx = dx * ca - dz * sa;
       const lz = dx * sa + dz * ca;
+      if (b.type === "frame" && Math.abs(lx) < 0.78) continue;
       const px = Math.max(-hx, Math.min(hx, lx));
       const pz = Math.max(-hz, Math.min(hz, lz));
       const ox = lx - px;
       const oz = lz - pz;
-      if (ox * ox + oz * oz < pr * pr) {
-        const d = Math.max(0.001, Math.hypot(ox, oz));
-        const nx = ox / d;
-        const nz = oz / d;
-        const wx = nx * ca + nz * sa;
-        const wz = -nx * sa + nz * ca;
-        this.pos.x += wx * (pr - d);
-        this.pos.z += wz * (pr - d);
-      }
+      if (ox * ox + oz * oz >= pr * pr) continue;
+      const lo = b.bottom ?? b.pos.y;
+      const hi = b.top ?? b.pos.y + 1;
+      const head = this.pos.y + 1.75;
+      if (lo >= head - 0.05) continue;
+      if (hi <= this.pos.y + 0.02) continue;
+      const surface = this.surfaceAt(b, this.pos.x, this.pos.z);
+      const top = surface ?? b.top ?? b.pos.y;
+      if (this.pos.y >= top - 0.08) continue;
+      if (top > this.pos.y && top - this.pos.y <= step) continue;
+      const d = Math.max(0.001, Math.hypot(ox, oz));
+      const nx = ox / d;
+      const nz = oz / d;
+      const wx = nx * ca + nz * sa;
+      const wz = -nx * sa + nz * ca;
+      this.pos.x += wx * (pr - d);
+      this.pos.z += wz * (pr - d);
     }
   }
 
@@ -1573,7 +2033,7 @@ export class TribalsEngine {
       toP.y = 0;
       const dist = toP.length();
       const aggro = c.aggro * (night && (c.kind === "wolf" || c.kind === "bear") ? 1.45 : 1);
-      const wildlife = c.kind === "deer" || c.kind === "goat" || c.kind === "boar" || c.kind === "wolf" || c.kind === "bear";
+      const wildlife = c.kind === "deer" || c.kind === "goat" || c.kind === "boar" || c.kind === "wolf" || c.kind === "bear" || c.kind === "chicken" || c.kind === "fish" || c.kind === "crab";
       if (wildlife && !c.provoked) {
         c.wanderT -= dt;
         if (c.wanderT <= 0) {
@@ -1605,7 +2065,7 @@ export class TribalsEngine {
         dirz = this.pos.z - c.pos.z;
         if (c.ranged > 0 && dist < c.ranged && dist > 8 && c.cd <= 0) {
           this.creatureShoot(c);
-          c.cd = c.kind === "sniper" ? 2.2 : 1.1;
+          c.cd = 1.1;
         }
       } else if (c.state === "flee") {
         dirx = c.pos.x - this.pos.x;
@@ -1619,14 +2079,17 @@ export class TribalsEngine {
       c.pos.x += (dirx / len) * sp * dt;
       c.pos.z += (dirz / len) * sp * dt;
       this.solidAt(c.pos, c.radius, c);
-      c.pos.y = this.sample(c.pos.x, c.pos.z);
-      if (c.pos.y < WATER_Y) {
-        c.pos.x -= (dirx / len) * sp * dt * 2;
-        c.pos.z -= (dirz / len) * sp * dt * 2;
-        this.solidAt(c.pos, c.radius, c);
-        c.pos.y = this.sample(c.pos.x, c.pos.z);
-      }
       c.yaw = Math.atan2(dirx, dirz);
+      if (c.kind === "fish") c.pos.y = WATER_Y - 0.02;
+      else {
+        c.pos.y = this.sample(c.pos.x, c.pos.z);
+        if (c.pos.y < WATER_Y) {
+          c.pos.x -= (dirx / len) * sp * dt * 2;
+          c.pos.z -= (dirz / len) * sp * dt * 2;
+          this.solidAt(c.pos, c.radius, c);
+          c.pos.y = Math.max(this.sample(c.pos.x, c.pos.z), WATER_Y);
+        }
+      }
       c.mesh.position.copy(c.pos);
       c.mesh.rotation.y = c.yaw;
       this.stepRig(c.mesh, dt, c.state !== "attack");
@@ -1771,11 +2234,11 @@ export class TribalsEngine {
       c.alive = false;
       c.mesh.visible = false;
       this.kills++;
-      this.score += c.kind === "boss" ? 250 : c.kind === "bear" ? 80 : 40;
-      const drop: ItemId = c.kind === "deer" || c.kind === "boar" || c.kind === "bear" ? "meat" : c.kind === "wolf" ? "fiber" : "cloth";
+      this.score += c.kind === "bear" ? 80 : 40;
+      const drop: ItemId =
+        c.kind === "fish" || c.kind === "crab" ? "fish" : c.kind === "wolf" ? "fiber" : c.kind === "chicken" || c.kind === "deer" || c.kind === "boar" || c.kind === "bear" || c.kind === "goat" ? "meat" : "cloth";
       this.spawnDrop(c.pos.x, c.pos.y + 0.4, c.pos.z, drop, 1 + (c.kind === "bear" ? 2 : 0));
-      if (c.kind === "deer" || c.kind === "boar" || c.kind === "wolf" || c.kind === "bear" || c.kind === "goat") this.quest("hunt", 1);
-      else this.quest("raid", 1);
+      this.quest("hunt", 1);
     }
   }
 
@@ -1857,16 +2320,31 @@ export class TribalsEngine {
     this.ghost.visible = false;
     let canPlace = false;
     let placePos: THREE.Vector3 | null = null;
+    let placeRot = 0;
     if (placeId) {
-      const gy = this.sample(this.pos.x + this.fwd.x * 2.4, this.pos.z + this.fwd.z * 2.4);
-      const gx = Math.round((this.pos.x + this.fwd.x * 2.4) / 1.5) * 1.5;
-      const gz = Math.round((this.pos.z + this.fwd.z * 2.4) / 1.5) * 1.5;
-      this.ghost.position.set(gx, gy + 0.2, gz);
-      this.ghost.rotation.y = Math.round(this.yaw / (Math.PI / 2)) * (Math.PI / 2);
-      this.ghost.visible = true;
-      canPlace = gy > WATER_Y - 0.2;
-      (this.ghost.material as THREE.MeshBasicMaterial).color.set(canPlace ? 0x6db56d : 0xc4453c);
-      placePos = this.ghost.position.clone();
+      const snap = this.snapBuild(placeId);
+      if (snap) {
+        const spec = this.buildSpec(placeId);
+        this.ghost.scale.set(spec.sx, spec.sy, spec.sz);
+        this.ghost.position.set(snap.x, snap.y + spec.oy, snap.z);
+        this.ghost.rotation.y = snap.rot;
+        this.ghost.visible = true;
+        canPlace = snap.ok;
+        (this.ghost.material as THREE.MeshBasicMaterial).color.set(canPlace ? 0x6db56d : 0xc4453c);
+        placePos = new THREE.Vector3(snap.x, snap.y, snap.z);
+        placeRot = snap.rot;
+      }
+    }
+
+    if (!prompt) {
+      const near = this.nearestBuild(this.pos.x, this.pos.z, 2.4, ["door", "crate", "furnace", "campfire"]);
+      if (near && slot?.id === "lock" && !near.code && (near.type === "door" || near.type === "crate")) {
+        prompt = { label: copy.lockHint, key: "E" };
+      } else if (near?.type === "door") {
+        prompt = { label: near.code && !this.knowsLock(near) ? copy.lockEnter : copy.open, key: "E" };
+      } else if (near) {
+        prompt = { label: near.code && !this.knowsLock(near) ? copy.lockEnter : copy.cook, key: "E" };
+      }
     }
 
     useGameStore.getState().patch({ prompt, aimOk: !!aimHit });
@@ -1887,25 +2365,36 @@ export class TribalsEngine {
         useGameStore.getState().patch({ inventory: inv, thirst: this.thirst });
       } else {
         for (const b of this.builds) {
-          if (b.pos.distanceTo(this.pos) < 2.4 && (b.type === "door" || b.type === "furnace" || b.type === "campfire" || b.type === "crate")) {
-            if (b.type === "door") {
-              b.open = !b.open;
-              b.mesh.rotation.y = b.rot + (b.open ? Math.PI / 2 : 0);
-            } else this.setOverlay("craft");
+          if (b.pos.distanceTo(this.pos) >= 2.4) continue;
+          if (b.type !== "door" && b.type !== "furnace" && b.type !== "campfire" && b.type !== "crate") continue;
+          if (slot?.id === "lock" && (b.type === "door" || b.type === "crate") && !b.code) {
+            this.askLock(b.id, "set");
+            break;
           }
+          if ((b.type === "door" || b.type === "crate") && b.code && !this.knowsLock(b)) {
+            this.askLock(b.id, "open");
+            break;
+          }
+          if (b.type === "door") this.toggleDoor(b);
+          else this.setOverlay("craft");
+          break;
         }
       }
     }
 
     if (act.fire && this.fireCd <= 0 && this.overlay === "none") {
       if (placeId && canPlace && placePos && slot) {
-        this.placeBuild(placeId, placePos, this.ghost.rotation.y);
+        this.placeBuild(placeId, placePos, placeRot);
         const inv = useGameStore.getState().inventory.slice();
         takeItem(inv, slot.id, 1);
         useGameStore.getState().patch({ inventory: inv });
         this.fireCd = 0.35;
         this.audio.place();
         this.quest("base", 1);
+      } else if (slot?.id === "lock") {
+        const target = this.nearestBuild(this.pos.x, this.pos.z, 2.6, ["door", "crate"]);
+        if (target && !target.code) this.askLock(target.id, "set");
+        this.fireCd = 0.35;
       } else if (def && (def.hunger || def.heal || def.thirst) && def.kind === "none") {
         this.consume(def.id);
         this.fireCd = 0.4;
@@ -2056,6 +2545,77 @@ export class TribalsEngine {
     this.consume(id);
   }
 
+  private me() {
+    return (this.netName || "local").toLowerCase();
+  }
+
+  private knowsLock(b: Build) {
+    return (b.owners ?? []).some((n) => n.toLowerCase() === this.me());
+  }
+
+  private askLock(id: number, mode: "set" | "open") {
+    this.overlay = "lock";
+    useGameStore.getState().patch({ overlay: "lock", lockAsk: { id, mode } });
+    if (document.pointerLockElement) document.exitPointerLock();
+  }
+
+  submitLock(code: string) {
+    const ask = useGameStore.getState().lockAsk;
+    if (!ask || !/^\d{4}$/.test(code)) return false;
+    const b = this.builds.find((x) => x.id === ask.id);
+    if (!b) {
+      this.closeLock();
+      return false;
+    }
+    if (ask.mode === "set") {
+      const inv = useGameStore.getState().inventory.slice();
+      if (!takeItem(inv, "lock", 1)) return false;
+      b.code = code;
+      b.owners = [this.netName || "local"];
+      this.attachLockMesh(b);
+      useGameStore.getState().patch({ inventory: inv });
+      useGameStore.getState().toast(t().lockOn);
+      this.closeLock();
+      this.save();
+      return true;
+    }
+    if (b.code === code) {
+      const me = this.netName || "local";
+      b.owners = [...new Set([...(b.owners ?? []), me])];
+      this.closeLock();
+      this.save();
+      if (b.type === "door") this.toggleDoor(b);
+      else this.setOverlay("craft");
+      return true;
+    }
+    useGameStore.getState().toast(t().lockBad);
+    return false;
+  }
+
+  closeLock() {
+    this.overlay = "none";
+    useGameStore.getState().patch({ overlay: "none", lockAsk: null });
+  }
+
+  private toggleDoor(b: Build) {
+    b.open = !b.open;
+    const panel = b.mesh.getObjectByName("panel");
+    if (panel) panel.rotation.y = b.open ? -Math.PI / 2 : 0;
+  }
+
+  private attachLockMesh(b: Build) {
+    const prev = b.mesh.getObjectByName("padlock");
+    if (prev) b.mesh.remove(prev);
+    if (!b.code) return;
+    const lock = new THREE.Mesh(
+      new THREE.BoxGeometry(0.08, 0.11, 0.045),
+      new THREE.MeshStandardMaterial({ color: 0xd4b15a, metalness: 0.7, roughness: 0.3 }),
+    );
+    lock.name = "padlock";
+    lock.position.set(b.type === "door" ? 0.42 : 0, b.type === "door" ? 1.15 : 0.55, b.type === "door" ? 0.12 : 0.4);
+    b.mesh.add(lock);
+  }
+
   private consume(id: ItemId) {
     const def = ITEM[id];
     const inv = useGameStore.getState().inventory.slice();
@@ -2068,61 +2628,489 @@ export class TribalsEngine {
     this.audio.eat();
   }
 
-  private placeBuild(type: ItemId, pos: THREE.Vector3, rot: number) {
-    const maps = this.texMaps;
-    const mat = new THREE.MeshStandardMaterial({
-      map: type === "furnace" ? maps.rock : maps.planks,
-      roughness: 0.86,
-    });
-    let geo: THREE.BufferGeometry = new THREE.BoxGeometry(1.5, 0.35, 1.5);
-    let oy = 0.18;
-    if (type === "wall" || type === "window") {
-      geo = new THREE.BoxGeometry(1.5, 1.8, 0.18);
-      oy = 1.05;
+  private buildSpec(type: ItemId) {
+    if (type === "wall" || type === "window" || type === "frame") return { sx: TILE, sy: WALL_H, sz: 0.18, oy: WALL_H / 2, hx: TILE / 2, hz: 0.12 };
+    if (type === "door") return { sx: 1.7, sy: 2.6, sz: 0.2, oy: 1.3, hx: 0.72, hz: 0.12 };
+    if (type === "fence") return { sx: TILE, sy: 1.35, sz: 0.16, oy: 0.68, hx: TILE / 2, hz: 0.1 };
+    if (type === "roof") return { sx: TILE, sy: 0.16, sz: TILE, oy: 0.08, hx: TILE / 2, hz: TILE / 2 };
+    if (type === "stairs") return { sx: TILE, sy: WALL_H, sz: TILE, oy: WALL_H / 2, hx: TILE / 2, hz: TILE / 2 };
+    if (type === "crate") return { sx: 1.05, sy: 0.82, sz: 0.78, oy: 0.41, hx: 0.52, hz: 0.39 };
+    if (type === "furnace") return { sx: 1.05, sy: 1.25, sz: 1.05, oy: 0.62, hx: 0.52, hz: 0.52 };
+    if (type === "workbench") return { sx: 1.5, sy: 0.9, sz: 1, oy: 0.45, hx: 0.75, hz: 0.5 };
+    if (type === "campfire") return { sx: 1.1, sy: 0.35, sz: 1.1, oy: 0.18, hx: 0.55, hz: 0.55 };
+    if (type === "plant") return { sx: 0.7, sy: 0.9, sz: 0.7, oy: 0.45, hx: 0.3, hz: 0.3 };
+    return { sx: TILE, sy: FLOOR_T, sz: TILE, oy: FLOOR_T / 2, hx: TILE / 2, hz: TILE / 2 };
+  }
+
+  private nearestBuild(x: number, z: number, maxDist: number, types: ItemId[]) {
+    let best: Build | null = null;
+    let bd = maxDist;
+    for (const b of this.builds) {
+      if (!types.includes(b.type)) continue;
+      const d = Math.hypot(b.pos.x - x, b.pos.z - z);
+      if (d < bd) {
+        bd = d;
+        best = b;
+      }
+    }
+    return best;
+  }
+
+  private snapBuild(type: ItemId) {
+    const aimX = this.pos.x + this.fwd.x * 2.8;
+    const aimZ = this.pos.z + this.fwd.z * 2.8;
+    let x = Math.round(aimX / TILE) * TILE;
+    let z = Math.round(aimZ / TILE) * TILE;
+    let rot = Math.round(this.yaw / (Math.PI / 2)) * (Math.PI / 2);
+    let y = Math.max(this.sample(x, z), 0.05);
+    const edge = type === "wall" || type === "door" || type === "window" || type === "fence" || type === "frame";
+    if (edge) {
+      const base = this.nearestBuild(aimX, aimZ, TILE * 0.95, ["foundation"]);
+      const host = base ?? { pos: new THREE.Vector3(x, y, z), bottom: y };
+      const by = base?.bottom ?? host.bottom ?? y;
+      const edges = [
+        { x: host.pos.x, z: host.pos.z - TILE / 2, rot: 0 },
+        { x: host.pos.x, z: host.pos.z + TILE / 2, rot: Math.PI },
+        { x: host.pos.x - TILE / 2, z: host.pos.z, rot: Math.PI / 2 },
+        { x: host.pos.x + TILE / 2, z: host.pos.z, rot: -Math.PI / 2 },
+      ];
+      let best = edges[0];
+      let bd = Infinity;
+      for (const e of edges) {
+        const d = (e.x - aimX) ** 2 + (e.z - aimZ) ** 2;
+        if (d < bd) {
+          bd = d;
+          best = e;
+        }
+      }
+      x = best.x;
+      z = best.z;
+      rot = best.rot;
+      y = by;
+    } else if (type === "roof") {
+      const found = this.nearestBuild(aimX, aimZ, TILE * 0.8, ["foundation"]);
+      if (found) {
+        x = found.pos.x;
+        z = found.pos.z;
+        y = (found.bottom ?? found.pos.y) + WALL_H;
+      } else {
+        y += WALL_H;
+      }
+    } else if (type === "stairs") {
+      const found = this.nearestBuild(x, z, TILE * 1.15, ["foundation"]);
+      if (found && Math.hypot(found.pos.x - x, found.pos.z - z) > 0.2) y = found.bottom ?? found.pos.y;
+    } else if (type === "foundation") {
+      const found = this.nearestBuild(x, z, TILE * 1.15, ["foundation"]);
+      if (found) y = found.bottom ?? found.pos.y;
+    } else {
+      const found = this.nearestBuild(x, z, TILE * 0.55, ["foundation", "roof"]);
+      if (found) y = found.top ?? found.pos.y;
     }
     if (type === "door") {
-      geo = new THREE.BoxGeometry(1.2, 1.8, 0.14);
-      oy = 1.05;
+      const frame = this.nearestBuild(aimX, aimZ, TILE, ["frame"]);
+      if (frame) {
+        x = frame.pos.x;
+        z = frame.pos.z;
+        rot = frame.rot;
+        y = frame.bottom ?? frame.pos.y;
+      }
     }
-    if (type === "roof") {
-      geo = new THREE.BoxGeometry(1.6, 0.16, 1.6);
-      oy = 2.0;
+    const blocked = this.builds.some((b) => {
+      if (Math.hypot(b.pos.x - x, b.pos.z - z) > 0.35) return false;
+      if (b.type === type) return true;
+      if ((type === "door" && b.type === "frame") || (type === "frame" && b.type === "door")) return false;
+      const solid = b.type === "wall" || b.type === "door" || b.type === "window" || b.type === "fence" || b.type === "frame";
+      const want = type === "wall" || type === "door" || type === "window" || type === "fence" || type === "frame";
+      return solid && want;
+    });
+    const ok = y > WATER_Y - 0.35 && !blocked;
+    return { x, z, y, rot, ok };
+  }
+
+  private supportY(x: number, z: number) {
+    let y = this.sample(x, z);
+    for (const b of this.builds) {
+      const s = this.surfaceAt(b, x, z);
+      if (s != null && s <= this.pos.y + 0.95 && s > y) y = s;
     }
-    if (type === "stairs") {
-      geo = new THREE.BoxGeometry(1.5, 0.7, 1.5);
-      oy = 0.4;
+    return y;
+  }
+
+  private surfaceAt(b: Build, x: number, z: number) {
+    const dx = x - b.pos.x;
+    const dz = z - b.pos.z;
+    const ca = Math.cos(-b.rot);
+    const sa = Math.sin(-b.rot);
+    const lx = dx * ca - dz * sa;
+    const lz = dx * sa + dz * ca;
+    const hx = b.hx ?? 1;
+    const hz = b.hz ?? 1;
+    if (Math.abs(lx) > hx || Math.abs(lz) > hz) return null;
+    if (b.type === "stairs") {
+      const t = (lz + hz) / Math.max(0.001, hz * 2);
+      return (b.bottom ?? b.pos.y) + Math.min(1, Math.max(0, t)) * WALL_H;
     }
-    if (type === "crate") {
-      geo = new THREE.BoxGeometry(0.9, 0.9, 0.9);
-      oy = 0.5;
-    }
-    if (type === "furnace" || type === "workbench") {
-      geo = new THREE.BoxGeometry(type === "workbench" ? 1.4 : 1.0, type === "workbench" ? 0.85 : 1.2, 1.0);
-      oy = type === "workbench" ? 0.48 : 0.65;
-    }
-    if (type === "campfire") {
-      geo = new THREE.CylinderGeometry(0.55, 0.7, 0.35, 8);
-      oy = 0.2;
-    }
-    if (type === "plant") {
-      geo = new THREE.ConeGeometry(0.35, 0.9, 6);
-      oy = 0.5;
-    }
-    const mesh = new THREE.Mesh(geo, mat);
-    mesh.position.set(pos.x, pos.y + oy, pos.z);
+    if (b.type === "wall" || b.type === "window" || b.type === "door" || b.type === "fence" || b.type === "frame") return b.top ?? null;
+    return b.top ?? null;
+  }
+
+  private placeBuild(type: ItemId, pos: THREE.Vector3, rot: number) {
+    const spec = this.buildSpec(type);
+    const mesh = this.makeBuildMesh(type);
+    const grounded = type === "door" || type === "fence" || type === "crate" || type === "campfire" || type === "plant" || type === "furnace" || type === "workbench";
+    mesh.position.set(pos.x, grounded ? pos.y : pos.y + spec.oy, pos.z);
     mesh.rotation.y = rot;
     this.scene.add(mesh);
-    this.builds.push({ id: this.buildId++, type, mesh, pos: mesh.position.clone(), rot });
+    const bottom = pos.y;
+    const top = type === "stairs" ? pos.y + WALL_H : pos.y + spec.sy;
+    const built: Build = {
+      id: this.buildId++,
+      type,
+      mesh,
+      pos: new THREE.Vector3(pos.x, bottom, pos.z),
+      rot,
+      hx: spec.hx,
+      hz: spec.hz,
+      bottom,
+      top,
+    };
+    this.builds.push(built);
+    return built;
+  }
+
+  private plankMat(color = 0xffffff) {
+    return new THREE.MeshStandardMaterial({ map: this.texMaps.planks, color, roughness: 0.84 });
+  }
+
+  private boxAt(w: number, h: number, d: number, x: number, y: number, z: number) {
+    const g = new THREE.BoxGeometry(w, h, d);
+    g.translate(x, y, z);
+    return g;
+  }
+
+  private mergeParts(parts: THREE.BufferGeometry[]) {
+    return mergeGeometries(parts) ?? parts[0];
+  }
+
+  private makeBuildMesh(type: ItemId) {
+    if (type === "door") return this.makeDoor(this.texMaps.planks);
+    if (type === "fence") return this.makeFence(this.texMaps.planks);
+    if (type === "crate") return this.makeCrate(this.texMaps.planks);
+    if (type === "frame") return this.makeFrame();
+    if (type === "window") return this.makeWindow();
+    if (type === "furnace") return this.makeFurnace();
+    if (type === "workbench") return this.makeBench();
+    if (type === "campfire") return this.makeCampfire();
+    if (type === "plant") return this.makePlant();
+    if (type === "foundation") return this.makeFoundation();
+    if (type === "wall") return this.makeWall();
+    if (type === "roof") return this.makeRoof();
+    if (type === "stairs") return this.makeStairs();
+    const spec = this.buildSpec(type);
+    return new THREE.Mesh(new THREE.BoxGeometry(spec.sx, spec.sy, spec.sz), this.plankMat());
+  }
+
+  private makeFoundation() {
+    const t = FLOOR_T;
+    const parts = [
+      this.boxAt(TILE, 0.08, 0.12, 0, -t / 2 + 0.04, -0.88),
+      this.boxAt(TILE, 0.08, 0.12, 0, -t / 2 + 0.04, 0.88),
+      this.boxAt(0.12, 0.08, TILE - 0.16, -0.88, -t / 2 + 0.04, 0),
+      this.boxAt(0.12, 0.08, TILE - 0.16, 0.88, -t / 2 + 0.04, 0),
+    ];
+    for (let i = -4; i <= 4; i++) parts.push(this.boxAt(TILE * 0.96, 0.05, 0.16, 0, t / 2 - 0.025, i * 0.2));
+    return new THREE.Mesh(this.mergeParts(parts), this.plankMat());
+  }
+
+  private makeWall() {
+    const h = WALL_H;
+    const parts = [
+      this.boxAt(0.14, h, 0.16, -0.92, 0, 0),
+      this.boxAt(0.14, h, 0.16, 0.92, 0, 0),
+      this.boxAt(1.7, 0.12, 0.16, 0, -h / 2 + 0.06, 0),
+      this.boxAt(1.7, 0.12, 0.16, 0, h / 2 - 0.06, 0),
+      this.boxAt(1.7, 0.08, 0.1, 0, 0, 0),
+    ];
+    for (let i = -3; i <= 3; i++) parts.push(this.boxAt(0.2, h - 0.3, 0.07, i * 0.25, 0, 0.03));
+    return new THREE.Mesh(this.mergeParts(parts), this.plankMat());
+  }
+
+  private makeRoof() {
+    const parts = [this.boxAt(TILE + 0.28, 0.07, TILE + 0.28, 0, 0.03, 0)];
+    for (let i = -4; i <= 4; i++) parts.push(this.boxAt(TILE + 0.2, 0.035, 0.16, 0, 0.07, i * 0.22));
+    parts.push(this.boxAt(0.1, 0.1, TILE, -0.7, -0.04, 0));
+    parts.push(this.boxAt(0.1, 0.1, TILE, 0.7, -0.04, 0));
+    return new THREE.Mesh(this.mergeParts(parts), this.plankMat(0xd7c4a3));
+  }
+
+  private makeStairs() {
+    const parts: THREE.BufferGeometry[] = [];
+    const steps = 6;
+    for (let i = 0; i < steps; i++) {
+      const h = (WALL_H / steps) * (i + 1);
+      parts.push(this.boxAt(TILE * 0.92, h, TILE / steps - 0.02, 0, h / 2 - WALL_H / 2, -TILE / 2 + (i + 0.5) * (TILE / steps)));
+    }
+    parts.push(this.boxAt(0.08, WALL_H, TILE, -TILE / 2 + 0.06, 0, 0));
+    parts.push(this.boxAt(0.08, WALL_H, TILE, TILE / 2 - 0.06, 0, 0));
+    return new THREE.Mesh(this.mergeParts(parts), this.plankMat());
+  }
+
+  private makeFrame() {
+    const g = new THREE.Group();
+    const wood = this.plankMat(0xc4a57a);
+    const h = WALL_H;
+    const postL = new THREE.Mesh(new THREE.BoxGeometry(0.16, h, 0.18), wood);
+    postL.position.set(-0.92, 0, 0);
+    const postR = postL.clone();
+    postR.position.x = 0.92;
+    const headerH = h - 2.62;
+    const header = new THREE.Mesh(new THREE.BoxGeometry(1.68, headerH, 0.2), wood);
+    header.position.set(0, -h / 2 + 2.62 + headerH / 2, 0);
+    const sill = new THREE.Mesh(new THREE.BoxGeometry(1.68, 0.08, 0.2), wood);
+    sill.position.set(0, -h / 2 + 0.04, 0);
+    g.add(postL, postR, header, sill);
+    return g;
+  }
+
+  private makeWindow() {
+    const g = new THREE.Group();
+    const wood = this.plankMat();
+    const h = WALL_H;
+    const add = (mesh: THREE.Mesh, x: number, y: number, z: number) => {
+      mesh.position.set(x, y, z);
+      g.add(mesh);
+    };
+    add(new THREE.Mesh(new THREE.BoxGeometry(0.14, h, 0.16), wood), -0.92, 0, 0);
+    add(new THREE.Mesh(new THREE.BoxGeometry(0.14, h, 0.16), wood), 0.92, 0, 0);
+    add(new THREE.Mesh(new THREE.BoxGeometry(1.7, 0.7, 0.12), wood), 0, -h / 2 + 0.4, 0);
+    add(new THREE.Mesh(new THREE.BoxGeometry(1.7, 0.7, 0.12), wood), 0, h / 2 - 0.4, 0);
+    add(new THREE.Mesh(new THREE.BoxGeometry(0.08, 1.5, 0.1), wood), 0, 0, 0);
+    const glass = new THREE.Mesh(
+      new THREE.BoxGeometry(1.55, 1.45, 0.02),
+      new THREE.MeshStandardMaterial({ color: 0x9fd4ee, transparent: true, opacity: 0.28, roughness: 0.05, metalness: 0.1 }),
+    );
+    add(glass, 0, 0, 0);
+    return g;
+  }
+
+  private makeDoor(map: THREE.Texture) {
+    const wood = new THREE.MeshStandardMaterial({ map, roughness: 0.82 });
+    const dark = new THREE.MeshStandardMaterial({ map, color: 0x6a4b30, roughness: 0.78 });
+    const g = new THREE.Group();
+    const jambL = new THREE.Mesh(new THREE.BoxGeometry(0.12, 2.55, 0.18), dark);
+    jambL.position.set(-0.78, 1.28, 0);
+    const jambR = jambL.clone();
+    jambR.position.x = 0.78;
+    const lintel = new THREE.Mesh(new THREE.BoxGeometry(1.68, 0.16, 0.2), dark);
+    lintel.position.set(0, 2.52, 0);
+    const sill = new THREE.Mesh(new THREE.BoxGeometry(1.68, 0.06, 0.2), dark);
+    sill.position.set(0, 0.03, 0);
+    const hinge = new THREE.Group();
+    hinge.name = "panel";
+    hinge.position.set(-0.66, 0, 0);
+    const panel = new THREE.Mesh(new THREE.BoxGeometry(1.28, 2.28, 0.07), wood);
+    panel.position.set(0.66, 1.2, 0);
+    const insetA = new THREE.Mesh(new THREE.BoxGeometry(0.96, 0.85, 0.025), dark);
+    insetA.position.set(0.66, 1.72, 0.04);
+    const insetB = insetA.clone();
+    insetB.position.y = 0.7;
+    const handle = new THREE.Mesh(
+      new THREE.BoxGeometry(0.045, 0.16, 0.08),
+      new THREE.MeshStandardMaterial({ color: 0xd4b15a, metalness: 0.65, roughness: 0.32 }),
+    );
+    handle.position.set(1.16, 1.15, 0.07);
+    hinge.add(panel, insetA, insetB, handle);
+    g.add(jambL, jambR, lintel, sill, hinge);
+    return g;
+  }
+
+  private makeFence(map: THREE.Texture) {
+    const wood = new THREE.MeshStandardMaterial({ map, color: 0xe2d0b0, roughness: 0.8 });
+    const g = new THREE.Group();
+    for (const x of [-0.92, 0.92]) {
+      const post = new THREE.Mesh(new THREE.BoxGeometry(0.1, 1.22, 0.1), wood);
+      post.position.set(x, 0.61, 0);
+      const cap = new THREE.Mesh(new THREE.ConeGeometry(0.07, 0.14, 4), wood);
+      cap.position.set(x, 1.28, 0);
+      g.add(post, cap);
+    }
+    for (const y of [0.45, 0.92]) {
+      const rail = new THREE.Mesh(new THREE.BoxGeometry(1.84, 0.07, 0.05), wood);
+      rail.position.set(0, y, 0.03);
+      g.add(rail);
+    }
+    for (let i = -3; i <= 3; i++) {
+      const pick = new THREE.Mesh(new THREE.BoxGeometry(0.07, 1.02, 0.035), wood);
+      pick.position.set(i * 0.26, 0.55, 0);
+      g.add(pick);
+    }
+    return g;
+  }
+
+  private makeCrate(map: THREE.Texture) {
+    const wood = new THREE.MeshStandardMaterial({ map, roughness: 0.8 });
+    const band = new THREE.MeshStandardMaterial({ color: 0x3e3428, roughness: 0.5, metalness: 0.25 });
+    const g = new THREE.Group();
+    const body = new THREE.Mesh(new THREE.BoxGeometry(0.92, 0.52, 0.68), wood);
+    body.position.y = 0.26;
+    const lid = new THREE.Mesh(new THREE.BoxGeometry(0.98, 0.12, 0.74), wood);
+    lid.position.y = 0.58;
+    const lip = new THREE.Mesh(new THREE.BoxGeometry(1.02, 0.04, 0.78), wood);
+    lip.position.y = 0.66;
+    g.add(body, lid, lip);
+    for (const z of [-0.35, 0.35]) {
+      const strap = new THREE.Mesh(new THREE.BoxGeometry(0.96, 0.055, 0.02), band);
+      strap.position.set(0, 0.28, z);
+      g.add(strap);
+    }
+    for (const x of [-0.47, 0.47]) {
+      const strap = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.055, 0.7), band);
+      strap.position.set(x, 0.28, 0);
+      g.add(strap);
+    }
+    const latch = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.1, 0.05), band);
+    latch.position.set(0, 0.52, 0.36);
+    g.add(latch);
+    return g;
+  }
+
+  private makeFurnace() {
+    const rock = new THREE.MeshStandardMaterial({ map: this.texMaps.rock, roughness: 0.92 });
+    const dark = new THREE.MeshStandardMaterial({ color: 0x1a120e, roughness: 0.8 });
+    const ember = new THREE.MeshStandardMaterial({ color: 0xff6a2a, emissive: 0xff4a10, emissiveIntensity: 0.6 });
+    const g = new THREE.Group();
+    const body = new THREE.Mesh(new THREE.BoxGeometry(0.95, 0.82, 0.9), rock);
+    body.position.y = 0.41;
+    const mouth = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.28, 0.06), dark);
+    mouth.position.set(0, 0.32, 0.44);
+    const glow = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.14, 0.04), ember);
+    glow.position.set(0, 0.24, 0.46);
+    const stack = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.42, 0.28), rock);
+    stack.position.set(0, 1.02, -0.22);
+    g.add(body, mouth, glow, stack);
+    return g;
+  }
+
+  private makeBench() {
+    const wood = this.plankMat();
+    const g = new THREE.Group();
+    const top = new THREE.Mesh(new THREE.BoxGeometry(1.45, 0.08, 0.78), wood);
+    top.position.y = 0.78;
+    const shelf = new THREE.Mesh(new THREE.BoxGeometry(1.3, 0.05, 0.62), wood);
+    shelf.position.y = 0.32;
+    g.add(top, shelf);
+    for (const [x, z] of [[-0.62, -0.3], [0.62, -0.3], [-0.62, 0.3], [0.62, 0.3]] as const) {
+      const leg = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.78, 0.08), wood);
+      leg.position.set(x, 0.39, z);
+      g.add(leg);
+    }
+    const vice = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.12, 0.16), new THREE.MeshStandardMaterial({ color: 0x8d939a, metalness: 0.5, roughness: 0.4 }));
+    vice.position.set(0.5, 0.88, 0);
+    g.add(vice);
+    return g;
+  }
+
+  private makeCampfire() {
+    const g = new THREE.Group();
+    const rock = new THREE.MeshStandardMaterial({ map: this.texMaps.rock, roughness: 0.95 });
+    const log = new THREE.MeshStandardMaterial({ map: this.texMaps.bark, roughness: 0.9 });
+    for (let i = 0; i < 8; i++) {
+      const a = (i / 8) * Math.PI * 2;
+      const stone = new THREE.Mesh(new THREE.DodecahedronGeometry(0.12, 0), rock);
+      stone.position.set(Math.cos(a) * 0.38, 0.1, Math.sin(a) * 0.38);
+      stone.scale.y = 0.7;
+      g.add(stone);
+    }
+    for (const r of [0.4, -0.5]) {
+      const stick = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.05, 0.7, 6), log);
+      stick.rotation.z = r;
+      stick.rotation.y = r;
+      stick.position.y = 0.16;
+      g.add(stick);
+    }
+    const flame = new THREE.Mesh(
+      new THREE.ConeGeometry(0.1, 0.28, 5),
+      new THREE.MeshStandardMaterial({ color: 0xff7a2a, emissive: 0xff5a10, emissiveIntensity: 0.8 }),
+    );
+    flame.position.y = 0.28;
+    g.add(flame);
+    return g;
+  }
+
+  private makePlant() {
+    const g = new THREE.Group();
+    const trunk = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.05, 0.07, 0.35, 6),
+      new THREE.MeshStandardMaterial({ map: this.texMaps.bark, roughness: 0.9 }),
+    );
+    trunk.position.y = 0.18;
+    const leaf = new THREE.Mesh(
+      new THREE.ConeGeometry(0.28, 0.55, 7),
+      new THREE.MeshStandardMaterial({ map: this.texMaps.leaves, color: 0x3e8a34, roughness: 0.8 }),
+    );
+    leaf.position.y = 0.55;
+    const leaf2 = leaf.clone();
+    leaf2.scale.set(0.7, 0.7, 0.7);
+    leaf2.position.y = 0.78;
+    g.add(trunk, leaf, leaf2);
+    return g;
   }
 
   private spawnDrop(x: number, y: number, z: number, id: ItemId, n: number) {
-    const mesh = new THREE.Mesh(
-      new THREE.BoxGeometry(0.28, 0.28, 0.28),
-      new THREE.MeshStandardMaterial({ color: 0xd4b56a, roughness: 0.5 }),
-    );
-    mesh.position.set(x + (this.rng() - 0.5), y, z + (this.rng() - 0.5));
+    const mesh = this.itemProp(id);
+    mesh.position.set(x + (this.rng() - 0.5) * 0.4, y + 0.05, z + (this.rng() - 0.5) * 0.4);
     this.scene.add(mesh);
     this.drops.push({ mesh, id, n, life: 90 });
+  }
+
+  private itemProp(id: ItemId) {
+    const g = new THREE.Group();
+    if (id === "wood") {
+      const log = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.08, 0.42, 6), new THREE.MeshStandardMaterial({ map: this.texMaps.bark, roughness: 0.9 }));
+      log.rotation.z = Math.PI / 2;
+      log.position.y = 0.08;
+      g.add(log);
+    } else if (id === "fish" || id === "cookedFish") {
+      const fish = this.makeFish();
+      fish.scale.setScalar(0.7);
+      g.add(fish);
+    } else if (id === "meat" || id === "cookedMeat") {
+      const m = new THREE.Mesh(new THREE.SphereGeometry(0.1, 7, 5), this.tone(id === "cookedMeat" ? 0x8a4530 : 0xc4564e, 0.55));
+      m.scale.set(1.35, 0.55, 0.8);
+      m.position.y = 0.06;
+      g.add(m);
+    } else if (id === "fiber" || id === "herbs" || id === "berries") {
+      const col = id === "berries" ? 0xc4473a : id === "herbs" ? 0x3c8a36 : 0x8ea24a;
+      for (let i = 0; i < 5; i++) {
+        const blade = new THREE.Mesh(new THREE.ConeGeometry(0.02, 0.2, 4), this.tone(col, 0.7));
+        blade.position.set((i - 2) * 0.035, 0.1, (i % 2) * 0.03);
+        blade.rotation.z = (i - 2) * 0.18;
+        g.add(blade);
+      }
+    } else if (id === "cloth") {
+      const fold = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.06, 0.16), this.tone(0xd8d2c2, 0.9));
+      fold.position.y = 0.04;
+      fold.rotation.y = 0.4;
+      g.add(fold);
+    } else {
+      const col = id === "gold" || id === "ironIngot" ? 0xe1b84a : id === "iron" ? 0x9aa0a6 : id === "sulfur" ? 0xd6c24a : id === "coal" ? 0x2a2a2a : 0x8d8880;
+      const rock = new THREE.Mesh(new THREE.DodecahedronGeometry(0.11, 0), this.tone(col, 0.88));
+      rock.scale.set(1.15, 0.65, 0.9);
+      rock.position.y = 0.07;
+      g.add(rock);
+    }
+    return g;
+  }
+
+  private disposeObj(obj: THREE.Object3D) {
+    obj.traverse((child) => {
+      const mesh = child as THREE.Mesh;
+      if (!mesh.isMesh) return;
+      mesh.geometry?.dispose();
+      const mat = mesh.material;
+      if (Array.isArray(mat)) mat.forEach((m) => m.dispose());
+      else mat?.dispose();
+    });
   }
 
   private takeDrop(d: Drop) {
@@ -2134,8 +3122,7 @@ export class TribalsEngine {
     useGameStore.getState().toast(`${t().pickup} ${t().items[d.id]} ×${d.n}`);
     this.audio.pickup();
     this.scene.remove(d.mesh);
-    d.mesh.geometry.dispose();
-    (d.mesh.material as THREE.Material).dispose();
+    this.disposeObj(d.mesh);
     this.drops = this.drops.filter((x) => x !== d);
   }
 
@@ -2196,6 +3183,26 @@ export class TribalsEngine {
     useGameStore.getState().patch({ hotIndex: i });
   }
 
+  moveSlot(from: number, to: number) {
+    const src = useGameStore.getState().inventory;
+    if (from === to || from < 0 || to < 0 || from >= src.length || to >= src.length) return;
+    const inv = src.map((s) => (s ? { ...s } : null));
+    const a = inv[from];
+    const b = inv[to];
+    if (!a) return;
+    if (b && b.id === a.id) {
+      const room = ITEM[a.id].stack - b.count;
+      const take = Math.min(Math.max(0, room), a.count);
+      b.count += take;
+      a.count -= take;
+      inv[from] = a.count > 0 ? a : null;
+    } else {
+      inv[from] = b;
+      inv[to] = a;
+    }
+    useGameStore.getState().patch({ inventory: inv });
+  }
+
   respawn() {
     this.resetPlayer(false);
     this.dead = false;
@@ -2213,13 +3220,7 @@ export class TribalsEngine {
       this.cam.position.x += (this.rng() - 0.5) * 0.04;
       this.cam.position.y += (this.rng() - 0.5) * 0.03;
     }
-    const swayT = this.session;
-    for (const rec of this.inst) {
-      if (rec.kind !== "tree" || !rec.vis) continue;
-      for (let i = 0; i < rec.vis.length; i++) {
-        rec.vis[i].rotation.z = Math.sin(swayT * 1.2 + i) * 0.02;
-      }
-    }
+    this.windU.value = this.session;
 
     const ang = (this.time - 0.25) * Math.PI * 2;
     const sunDir = this.tmp.set(Math.cos(ang), Math.sin(ang), 0.25).normalize();
@@ -2370,7 +3371,16 @@ export class TribalsEngine {
       outfit: this.outfit,
       inventory: st.inventory,
       session: this.session,
-      builds: this.builds.map((b) => ({ type: b.type, x: b.mesh.position.x, y: b.mesh.position.y, z: b.mesh.position.z, rot: b.rot })),
+      builds: this.builds.map((b) => ({
+        type: b.type,
+        x: b.pos.x,
+        y: b.pos.y,
+        z: b.pos.z,
+        rot: b.rot,
+        code: b.code,
+        owners: b.owners,
+        open: b.open,
+      })),
     };
     try {
       localStorage.setItem(SAVE, JSON.stringify(data));
@@ -2403,7 +3413,7 @@ export class TribalsEngine {
         session: number;
         training: boolean;
         outfit: number;
-        builds: { type: ItemId; x: number; y: number; z: number; rot: number }[];
+        builds: { type: ItemId; x: number; y: number; z: number; rot: number; code?: string; owners?: string[]; open?: boolean }[];
       };
       this.pos.set(d.pos[0], d.pos[1], d.pos[2]);
       this.yaw = d.yaw;
@@ -2422,9 +3432,17 @@ export class TribalsEngine {
       this.session = d.session;
       this.training = d.training;
       this.outfit = d.outfit;
-      useGameStore.getState().patch({ inventory: d.inventory, outfit: d.outfit, training: d.training });
+      useGameStore.getState().patch({ inventory: fitInv(d.inventory), outfit: d.outfit, training: d.training });
       for (const b of d.builds ?? []) {
-        this.placeBuild(b.type, new THREE.Vector3(b.x, b.y - 0.18, b.z), b.rot);
+        const built = this.placeBuild(b.type, new THREE.Vector3(b.x, b.y, b.z), b.rot);
+        built.code = b.code;
+        built.owners = b.owners;
+        if (b.open && built.type === "door") {
+          built.open = true;
+          const panel = built.mesh.getObjectByName("panel");
+          if (panel) panel.rotation.y = -Math.PI / 2;
+        }
+        this.attachLockMesh(built);
       }
       return true;
     } catch {

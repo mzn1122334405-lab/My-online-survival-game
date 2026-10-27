@@ -181,6 +181,7 @@ export function GameApp() {
       {screen === "dead" && <DeadOverlay engine={engineRef} />}
       {(overlay === "inventory" || overlay === "craft") && <BagOverlay engine={engineRef} />}
       {overlay === "map" && <MapOverlay />}
+      {overlay === "lock" && <LockPad engine={engineRef} />}
     </div>
   );
 }
@@ -618,6 +619,71 @@ function TouchPad({ engine }: { engine: MutableRefObject<TribalsEngine | null> }
   );
 }
 
+function LockPad({ engine }: { engine: MutableRefObject<TribalsEngine | null> }) {
+  const lang = useGameStore((s) => s.lang);
+  const ask = useGameStore((s) => s.lockAsk);
+  const copy = COPY[lang];
+  const [code, setCode] = useState("");
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        engine.current?.closeLock();
+        return;
+      }
+      if (e.key === "Backspace") {
+        setCode((c) => c.slice(0, -1));
+        return;
+      }
+      if (e.key === "Enter") {
+        engine.current?.submitLock(code);
+        return;
+      }
+      if (/^\d$/.test(e.key) && code.length < 4) setCode((c) => c + e.key);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [code, engine]);
+  return (
+    <div className="pointer-events-auto absolute inset-0 z-40 flex items-center justify-center bg-ink/55">
+      <form
+        className="w-72 rounded-2xl border border-line bg-panel p-4 text-center shadow-lg"
+        onSubmit={(e) => {
+          e.preventDefault();
+          engine.current?.submitLock(code);
+        }}
+      >
+        <h3 className="mb-3 font-bold">{ask?.mode === "set" ? copy.lockSet : copy.lockEnter}</h3>
+        <div className="mb-3 flex justify-center gap-2">
+          {Array.from({ length: 4 }, (_, i) => (
+            <span key={i} className="flex size-10 items-center justify-center rounded-lg border border-line bg-raised font-mono text-lg">
+              {code[i] ?? ""}
+            </span>
+          ))}
+        </div>
+        <div className="grid grid-cols-3 gap-1">
+          {["1", "2", "3", "4", "5", "6", "7", "8", "9", "⌫", "0", "OK"].map((k) => (
+            <button
+              key={k}
+              type="button"
+              className="rounded-lg border border-line bg-raised py-2"
+              onClick={() => {
+                if (k === "⌫") setCode((c) => c.slice(0, -1));
+                else if (k === "OK") engine.current?.submitLock(code);
+                else if (code.length < 4) setCode((c) => c + k);
+              }}
+            >
+              {k}
+            </button>
+          ))}
+        </div>
+        <button type="button" className="mt-3 text-sm text-muted" onClick={() => engine.current?.closeLock()}>
+          {lang === "ar" ? "إلغاء" : "Cancel"}
+        </button>
+      </form>
+    </div>
+  );
+}
+
 function PauseOverlay({ engine }: { engine: MutableRefObject<TribalsEngine | null> }) {
   const copy = t();
   const [setts, setSetts] = useState<GameSettings>(() => loadSettings());
@@ -751,10 +817,92 @@ function DeadOverlay({ engine }: { engine: MutableRefObject<TribalsEngine | null
   );
 }
 
+function BagSlots({
+  engine,
+  start,
+  count,
+  hold,
+  setHold,
+}: {
+  engine: MutableRefObject<TribalsEngine | null>;
+  start: number;
+  count: number;
+  hold: number | null;
+  setHold: (n: number | null) => void;
+}) {
+  const inv = useGameStore((s) => s.inventory);
+  const dragging = useRef(false);
+  return (
+    <div className="grid grid-cols-6 gap-1 sm:grid-cols-8">
+      {Array.from({ length: count }, (_, n) => {
+        const i = start + n;
+        const slot = inv[i];
+        return (
+          <button
+            key={i}
+            type="button"
+            draggable={!!slot}
+            onDragStart={(e) => {
+              dragging.current = true;
+              e.dataTransfer.setData("text/plain", String(i));
+              e.dataTransfer.effectAllowed = "move";
+              setHold(i);
+            }}
+            onDragEnd={() => {
+              window.setTimeout(() => {
+                dragging.current = false;
+              }, 0);
+            }}
+            onDragOver={(e) => e.preventDefault()}
+            onDrop={(e) => {
+              e.preventDefault();
+              const from = Number(e.dataTransfer.getData("text/plain"));
+              if (!Number.isNaN(from)) engine.current?.moveSlot(from, i);
+              setHold(null);
+            }}
+            onClick={() => {
+              if (dragging.current) return;
+              if (hold == null) {
+                if (!slot) return;
+                const it = ITEM[slot.id];
+                if (it.kind === "none" && (it.heal || it.hunger || it.thirst)) {
+                  engine.current?.useConsumable(slot.id);
+                  return;
+                }
+                setHold(i);
+                return;
+              }
+              if (hold === i) {
+                setHold(null);
+                return;
+              }
+              engine.current?.moveSlot(hold, i);
+              setHold(null);
+            }}
+            className={`flex aspect-square flex-col items-center justify-center rounded-lg border bg-raised p-1 ${
+              hold === i ? "border-amber" : "border-line"
+            }`}
+          >
+            {slot ? (
+              <>
+                <img src={ITEM[slot.id].icon} alt="" className="size-8 object-contain" crossOrigin="anonymous" />
+                <span className="text-[9px] tabular-nums text-muted">{slot.count}</span>
+              </>
+            ) : (
+              <span className="text-[10px] text-muted">{start === INV_SIZE ? n + 1 : ""}</span>
+            )}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 function BagOverlay({ engine }: { engine: MutableRefObject<TribalsEngine | null> }) {
   const s = useGameStore();
   const copy = COPY[s.lang];
   const [sel, setSel] = useState<Recipe>(RECIPES[0]);
+  const [hold, setHold] = useState<number | null>(null);
   const inv = s.inventory;
   const can = (r: Recipe) => {
     if (r.station !== "hand" && r.station !== s.nearStation) return false;
@@ -771,28 +919,10 @@ function BagOverlay({ engine }: { engine: MutableRefObject<TribalsEngine | null>
               Esc
             </button>
           </div>
-          <div className="grid grid-cols-6 gap-1 sm:grid-cols-8">
-            {inv.map((slot, i) => (
-              <button
-                key={i}
-                type="button"
-                onClick={() => {
-                  if (!slot) return;
-                  if (ITEM[slot.id].kind === "none" && (ITEM[slot.id].heal || ITEM[slot.id].hunger || ITEM[slot.id].thirst)) {
-                    engine.current?.useConsumable(slot.id);
-                  }
-                }}
-                className="flex aspect-square flex-col items-center justify-center rounded-lg border border-line bg-raised p-1"
-              >
-                {slot ? (
-                  <>
-                    <img src={ITEM[slot.id].icon} alt="" className="size-8 object-contain" crossOrigin="anonymous" />
-                    <span className="text-[9px] tabular-nums text-muted">{slot.count}</span>
-                  </>
-                ) : null}
-              </button>
-            ))}
-          </div>
+          <p className="mb-2 text-xs text-muted">{copy.drag}</p>
+          <BagSlots engine={engine} start={0} count={INV_SIZE} hold={hold} setHold={setHold} />
+          <p className="mb-1 mt-3 text-xs font-semibold text-amber">{copy.hotbar}</p>
+          <BagSlots engine={engine} start={INV_SIZE} count={HOTBAR} hold={hold} setHold={setHold} />
         </div>
         <div className="w-full overflow-auto sm:w-80">
           <h3 className="mb-2 font-bold">{copy.craft}</h3>
