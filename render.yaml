@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: my-online-survival-game
+    runtime: node
+    plan: free
+    buildCommand: npm ci && npm run build
+    startCommand: node .output/server/index.mjs
+    healthCheckPath: /
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: 22.16.0
+      - key: VITE_AUTH_ENABLED
+        value: "true"
+      - key: VITE_GROK_OAUTH_ENABLED
+        value: "false"
+      - key: BETTER_AUTH_SECRET
+        generateValue: true
+      - key: DATABASE_URL
+        sync: false
