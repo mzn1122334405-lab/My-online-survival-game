@@ -95,7 +95,6 @@ type RemotePawn = {
   radius: number;
 };
 
-type CaveHit = { x: number; z: number; yaw: number; hx: number; hz: number; bottom: number; top: number };
 type Drop = { mesh: THREE.Object3D; id: ItemId; n: number; life: number };
 type Bullet = {
   mesh: THREE.Mesh;
@@ -228,6 +227,8 @@ export class TribalsEngine {
   quests: Record<QuestId, number> = { wood: 0, axe: 0, tree: 0, hunt: 0, base: 0, raid: 0 };
   gathered: Partial<Record<ItemId, number>> = {};
   training = false;
+  serverId = "eu-1";
+  onProgress: ((json: string) => void) | null = null;
   outfit = 0;
   seed = 1;
   locked = false;
@@ -260,7 +261,6 @@ export class TribalsEngine {
   inst: InstProps[] = [];
   creatures: Creature[] = [];
   builds: Build[] = [];
-  private caveHits: CaveHit[] = [];
   drops: Drop[] = [];
   bullets: Bullet[] = [];
   rain: THREE.Points;
@@ -378,8 +378,9 @@ export class TribalsEngine {
     this.wcam.add(this.weapon);
   }
 
-  async start(opts: { training: boolean; outfit: number; load: boolean }) {
+  async start(opts: { training: boolean; outfit: number; load: boolean; serverId?: string }) {
     this.training = opts.training;
+    this.serverId = opts.serverId || "eu-1";
     this.outfit = opts.outfit;
     this.armMat.color.set(OUTFITS[opts.outfit]?.arm ?? "#6b7a4a");
     await this.loadTextures();
@@ -630,7 +631,6 @@ export class TribalsEngine {
     this.scene.add(this.water);
 
     this.scatter();
-    this.placeCaves();
     this.spawnFauna();
     this.makeCamps();
     this.placeBoats();
@@ -776,6 +776,7 @@ export class TribalsEngine {
     grove("rock_m", "rock", 2.7, 2.1, ring(46, -28, 3, 8), 70, "stone", "iron", 0.75);
     grove("rock_l", "rock", 3.4, 2.6, ring(54, -34, 3, 8), 95, "stone", "iron", 0.95);
 
+    grove("rock_m", "rock", 2.7, 2.1, ring(20, 40, 10, 11), 80, "iron", "stone", 0.7);
     grove("rock_gold", "rock", 2.4, 1.9, ring(-14, -48, 10, 10), 80, "gold", "sulfur", 0.65);
     grove("rock_s", "rock", 1.9, 1.45, ring(30, -16, 10, 10), 55, "sulfur", "stone", 0.5);
     grove("rock_l", "rock", 3.4, 2.6, ring(-56, -20, 10, 11), 70, "coal", "stone", 0.7);
@@ -783,131 +784,6 @@ export class TribalsEngine {
     grove("oak", "bush", 1.6, 1.35, ring(-24, 56, 10, 9), 16, "fiber", "fiber", 0.4);
     grove("oak", "bush", 1.6, 1.35, ring(36, 6, 10, 9), 16, "herbs", "herbs", 0.4);
     grove("oak", "bush", 1.6, 1.35, ring(-6, 46, 10, 9), 16, "berries", "berries", 0.4);
-  }
-
-  private placeCaves() {
-    const rock = new THREE.MeshStandardMaterial({ map: this.texMaps.rock, roughness: 0.96, color: 0xc8c2b4 });
-    const dark = new THREE.MeshStandardMaterial({ color: 0x2a2622, roughness: 1 });
-    const dirt = new THREE.MeshStandardMaterial({ color: 0x8a6a42, roughness: 1 });
-    const grass = new THREE.MeshStandardMaterial({ map: this.texMaps.leaves, color: 0x4e9a3a, roughness: 0.9 });
-    const mouths: { x: number; z: number; yaw: number; a: number }[] = [];
-    for (let i = 0; i < 6; i++) {
-      const a = (i / 6) * Math.PI * 2 + 0.45;
-      let x = Math.cos(a) * 70;
-      let z = Math.sin(a) * 70;
-      for (let k = 0; k < 22; k++) {
-        const y = this.sample(x, z);
-        const spawn = x * x + (z - 86) * (z - 86) < 26 * 26;
-        if (y > 0.7 && y < 3.6 && !spawn) break;
-        if (spawn || y > 3.6) {
-          x = Math.cos(a + 0.2) * (66 - k * 0.6);
-          z = Math.sin(a + 0.2) * (66 - k * 0.6);
-        } else {
-          x *= 0.96;
-          z *= 0.96;
-        }
-      }
-      mouths.push({ x, z, yaw: Math.atan2(-x, -z), a });
-    }
-    const irons: { x: number; z: number }[] = [];
-    const toWorld = (ox: number, oz: number, yaw: number, lx: number, lz: number) => {
-      const c = Math.cos(yaw);
-      const s = Math.sin(yaw);
-      return { x: ox + lx * c + lz * s, z: oz - lx * s + lz * c };
-    };
-    for (const m of mouths) {
-      const g = new THREE.Group();
-      const y = Math.max(this.sample(m.x, m.z), 0.4);
-      const box = (w: number, h: number, d: number, px: number, py: number, pz: number, mat: THREE.Material, ry = 0) => {
-        const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
-        mesh.position.set(px, py, pz);
-        mesh.rotation.y = ry;
-        mesh.castShadow = true;
-        mesh.receiveShadow = true;
-        g.add(mesh);
-      };
-      box(8.5, 0.18, 12.5, 0, 0.08, -5.2, dirt);
-      box(1.3, 5.4, 11, -3.15, 2.7, -5, rock);
-      box(1.3, 5.4, 3.2, 3.15, 2.7, -1.4, rock);
-      box(1.3, 5.4, 3.4, 3.15, 2.7, -8.6, rock);
-      box(4.6, 5.2, 1.3, 5.4, 2.6, -5.6, rock);
-      box(3.4, 5.2, 1.2, 5.2, 2.6, -3.2, rock);
-      box(3.2, 5.2, 1.2, 5.2, 2.6, -8, rock);
-      box(1.15, 4.6, 1.3, -1.7, 2.3, -11.1, rock);
-      box(1.15, 4.6, 1.3, 1.7, 2.3, -11.1, rock);
-      box(4.6, 1.3, 1.3, 0, 4.5, -11.1, rock);
-      box(7.6, 1.15, 4.2, 0, 4.55, -1.8, rock);
-      box(7.6, 1.15, 3.4, 0, 4.55, -8.4, rock);
-      box(2.2, 1.15, 3.2, -1.7, 4.55, -5.1, rock);
-      box(2.2, 1.15, 3.2, 1.7, 4.55, -5.1, rock);
-      box(2.4, 3.4, 2.2, -2.4, 1.7, 0.7, rock, 0.15);
-      box(2.6, 3.6, 2.4, 2.5, 1.8, 0.6, rock, -0.2);
-      box(3.2, 1.5, 2.6, 0.2, 4.1, 0.4, rock);
-      box(3.4, 2.2, 2.8, -4.2, 2.4, -2.2, rock, 0.4);
-      box(3.2, 2.6, 2.6, 4.6, 2.2, -1.2, rock, -0.35);
-      box(3.6, 2.4, 3, -3.6, 2.6, -8.5, rock, 0.25);
-      box(3.4, 2.8, 2.8, 4.4, 2.3, -9.2, rock, -0.3);
-      box(4.2, 1.6, 3.2, 0.4, 5.1, -4.8, rock);
-      box(2.2, 0.7, 2.2, -1.6, 5.5, -3.2, grass);
-      box(1.8, 0.55, 1.6, 1.8, 5.45, -6.6, grass);
-      box(1.4, 0.45, 1.2, -0.4, 5.7, -7.4, grass);
-      box(1.6, 0.9, 1.4, 6.2, 1.2, -5.6, rock);
-      box(1.2, 0.7, 1.1, -1.4, 0.45, -6.4, rock);
-      box(0.9, 0.55, 0.8, 2.2, 0.4, -7.2, dark);
-      const lamp = new THREE.PointLight(0xfff1d2, 0.55, 14, 2);
-      lamp.position.set(0.2, 3.2, -5.2);
-      g.add(lamp);
-      g.position.set(m.x, y, m.z);
-      g.rotation.y = m.yaw;
-      this.scene.add(g);
-      const hit = (hx: number, hz: number, lx: number, lz: number, top: number) => {
-        const w = toWorld(m.x, m.z, m.yaw, lx, lz);
-        this.caveHits.push({ x: w.x, z: w.z, yaw: m.yaw, hx, hz, bottom: y, top: y + top });
-      };
-      hit(1.15, 5.4, -3.15, -5, 5.2);
-      hit(1.15, 1.5, 3.15, -1.4, 5.2);
-      hit(1.15, 1.6, 3.15, -8.6, 5.2);
-      hit(2.2, 1.1, 5.4, -5.6, 5);
-      hit(1.5, 1.1, 5.2, -3.2, 5);
-      hit(1.5, 1.1, 5.2, -8, 5);
-      hit(1.05, 0.7, -1.7, -11.1, 4.4);
-      hit(1.05, 0.7, 1.7, -11.1, 4.4);
-      const deep = toWorld(m.x, m.z, m.yaw, -0.8, -6.2);
-      const side = toWorld(m.x, m.z, m.yaw, 4.2, -5.6);
-      irons.push(deep, side);
-    }
-    let n = 0;
-    this.makeBills("rock_m", irons.length, "rock", 1.7, 1.25, () => {
-      const p = irons[n++];
-      if (!p) return null;
-      return { hp: 80, drop: "iron", extra: "stone", x: p.x, z: p.z, r: 0.55 };
-    });
-  }
-
-  private collideCaves() {
-    const pr = 0.4;
-    for (const b of this.caveHits) {
-      const dx = this.pos.x - b.x;
-      const dz = this.pos.z - b.z;
-      const ca = Math.cos(-b.yaw);
-      const sa = Math.sin(-b.yaw);
-      const lx = dx * ca - dz * sa;
-      const lz = dx * sa + dz * ca;
-      const px = Math.max(-b.hx, Math.min(b.hx, lx));
-      const pz = Math.max(-b.hz, Math.min(b.hz, lz));
-      const ox = lx - px;
-      const oz = lz - pz;
-      if (ox * ox + oz * oz >= pr * pr) continue;
-      if (b.bottom >= this.pos.y + 1.7) continue;
-      if (b.top <= this.pos.y + 0.05) continue;
-      const d = Math.max(0.001, Math.hypot(ox, oz));
-      const nx = ox / d;
-      const nz = oz / d;
-      const wx = nx * ca + nz * sa;
-      const wz = -nx * sa + nz * ca;
-      this.pos.x += wx * (pr - d);
-      this.pos.z += wz * (pr - d);
-    }
   }
 
   private body(kind: Creature["kind"]) {
@@ -1853,7 +1729,6 @@ export class TribalsEngine {
       this.pos.y += this.vel.y * sdt;
       this.collideProps();
       this.collideBuilds();
-      this.collideCaves();
       this.collideMobs(0.4);
       this.collideRemotes(0.4);
       const ground = this.sample(this.pos.x, this.pos.z);
@@ -3349,7 +3224,12 @@ export class TribalsEngine {
     };
   }
 
+  private progressKey() {
+    return `${SAVE}:${this.serverId || "eu-1"}`;
+  }
+
   save() {
+    if (this.training) return;
     const st = useGameStore.getState();
     const data = {
       v: 1,
@@ -3383,7 +3263,9 @@ export class TribalsEngine {
       })),
     };
     try {
-      localStorage.setItem(SAVE, JSON.stringify(data));
+      const json = JSON.stringify(data);
+      localStorage.setItem(this.progressKey(), json);
+      this.onProgress?.(json);
       useGameStore.getState().patch({ hasSave: true });
     } catch {
       /* ignore */
@@ -3392,7 +3274,7 @@ export class TribalsEngine {
 
   loadSave() {
     try {
-      const raw = localStorage.getItem(SAVE);
+      const raw = localStorage.getItem(this.progressKey()) ?? localStorage.getItem(SAVE);
       if (!raw) return false;
       const d = JSON.parse(raw) as {
         pos: number[];

@@ -19,8 +19,8 @@ import { loadSettings, saveSettings, type GameSettings } from "@/game/settings";
 import { t, useGameStore } from "@/game/store";
 import { UserButton } from "@/lib/auth/gates";
 import { useCurrentUserState } from "@/lib/auth/use-current-user";
-import { addAdmin, enterServer, getMyProfile, listAdmins, upsertProfile, type Profile } from "@/game/online";
-import { OnlineSession } from "./OnlineSession";
+import { addAdmin, enterServer, getMyProfile, listAdmins, loadProgress, saveProgress, upsertProfile, type Profile } from "@/game/online";
+import { MainMenu } from "./MainMenu";
 
 function fmtTime(s: number) {
   const m = Math.floor(s / 60);
@@ -68,7 +68,7 @@ export function GameApp() {
   const locked = useGameStore((s) => s.locked);
   const copy = COPY[lang];
   const { user, isPending } = useCurrentUserState();
-  const [profile, setProfile] = useState<Profile | null>(null);
+  const [playError, setPlayError] = useState("");
 
   useEffect(() => {
     const id = useGameStore.getState().serverId;
@@ -124,8 +124,21 @@ export function GameApp() {
     engineRef.current = eng;
     window.__tribals = eng;
     const outfit = useGameStore.getState().outfit;
+    const key = `tribals-save-v1:${chosen}`;
+    if (!training && user) {
+      try {
+        const remote = await loadProgress({ data: chosen });
+        if (remote) localStorage.setItem(key, remote);
+      } catch {
+        /* keep the local server save */
+      }
+    }
     try {
-      await eng.start({ training, outfit, load });
+      await eng.start({ training, outfit, load: !training, serverId: chosen });
+      eng.onProgress = (json) => {
+        if (!user) return;
+        void saveProgress({ data: { serverId: chosen, data: json } }).catch(() => undefined);
+      };
       eng.audio.setMuted(muted);
     } catch (err) {
       console.error(err);
@@ -296,7 +309,6 @@ function Menu({
   profile: Profile | null;
 }) {
   const lang = useGameStore((s) => s.lang);
-  const has = useGameStore((s) => s.hasSave);
   const serverId = useGameStore((s) => s.serverId);
   const copy = COPY[lang];
 
@@ -358,16 +370,6 @@ function Menu({
           >
             {copy.train}
           </button>
-          {has && (
-            <button
-              type="button"
-              disabled={booting}
-              onClick={() => onPlay(false, true)}
-              className="rounded-xl border border-amber/40 bg-panel/80 px-6 py-3 text-base font-semibold text-amber"
-            >
-              {copy.resume}
-            </button>
-          )}
           <button
             type="button"
             onClick={() => useGameStore.getState().setLang(lang === "ar" ? "en" : "ar")}
@@ -706,7 +708,7 @@ function PauseOverlay({ engine }: { engine: MutableRefObject<TribalsEngine | nul
             }}
           >
             <Play className="me-2 inline size-4" />
-            {copy.resume}
+            {copy.play}
           </button>
           <button
             type="button"

@@ -131,6 +131,82 @@ export const getMyProfile = createServerFn({ method: "GET" })
     return profile;
   });
 
+const SERVER_IDS = new Set(["eu-1", "na-1", "as-1", "czar"]);
+
+function statOf(raw: string, key: "score" | "kills") {
+  try {
+    const n = Number((JSON.parse(raw) as Record<string, unknown>)[key]);
+    if (!Number.isFinite(n)) return 0;
+    return Math.max(0, Math.min(1_000_000, Math.floor(n)));
+  } catch {
+    return 0;
+  }
+}
+
+export const loadProgress = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((id: string) => (SERVER_IDS.has(id) ? id : "eu-1"))
+  .handler(async ({ context, data: serverId }): Promise<string | null> => {
+    const sql = await getSql();
+    const rows = await sql<{ data: string }>`
+      select data from server_progress where user_id = ${context.userId} and server_id = ${serverId}
+    `;
+    return rows[0]?.data ?? null;
+  });
+
+export const saveProgress = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((body: { serverId: string; data: string }) => ({
+    serverId: SERVER_IDS.has(body?.serverId) ? body.serverId : "eu-1",
+    data: typeof body?.data === "string" ? body.data.slice(0, 400000) : "",
+  }))
+  .handler(async ({ context, data }) => {
+    if (!data.data) return { ok: false as const };
+    const sql = await getSql();
+    await sql`
+      insert into server_progress (user_id, server_id, data, updated_at)
+      values (${context.userId}, ${data.serverId}, ${data.data}, now())
+      on conflict (user_id, server_id)
+      do update set data = ${data.data}, updated_at = now()
+    `;
+    if (me) {
+      await sql`
+        insert into leaderboard (user_id, server_id, username, score, kills, updated_at)
+        values (${context.userId}, ${data.serverId}, ${me.username}, ${statOf(data.data, "score")}, ${statOf(data.data, "kills")}, now())
+        on conflict (user_id, server_id)
+        do update set username = ${me.username}, score = ${statOf(data.data, "score")}, kills = ${statOf(data.data, "kills")}, updated_at = now()
+      `;
+    }
+    return { ok: true as const };
+  });
+
+export const listLeaderboard = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((id: string) => (SERVER_IDS.has(id) ? id : "eu-1"))
+  .handler(async ({ data: serverId }) => {
+    const sql = await getSql();
+    return sql<{ username: string; score: number; kills: number }>`
+      select username, score, kills from leaderboard
+      where server_id = ${serverId}
+      order by score desc, kills desc
+      limit 20
+    `;
+  });
+
+export const listTribes = createServerFn({ method: "GET" })
+  .middleware([authMiddleware])
+  .handler(async () => {
+    const sql = await getSql();
+    return sql<{ name: string; members: number }>`
+      select t.name, count(m.user_id)::int as members
+      from tribes t
+      left join tribe_members m on m.tribe_id = t.id
+      group by t.id
+      order by members desc, t.name
+      limit 20
+    `;
+  });
+
 export const enterServer = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
   .validator((id: string) => id.slice(0, 16))
