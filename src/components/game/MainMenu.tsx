@@ -31,16 +31,39 @@ type SaveSnap = {
   inventory?: { id: ItemId; count: number }[] | null;
 };
 
+const PREVIEW = {
+  coins: 1250,
+  gems: 40,
+  passTier: 3,
+  passMax: 10,
+};
+
+const SHOP_PREVIEW = [
+  { id: "skin-scout", ar: "زي الكشافة الذهبي", en: "Gold scout wrap", price: "240", kind: "gems" },
+  { id: "skin-knife", ar: "سكين تجميلي", en: "Cosmetic knife", price: "120", kind: "gems" },
+  { id: "pack-coins", ar: "حزمة عملات", en: "Coin pack", price: "$4.99", kind: "cash" },
+  { id: "season", ar: "عرض الموسم", en: "Season offer", price: "$9.99", kind: "cash" },
+];
+
+const PASS_PREVIEW = [
+  { tier: 1, ar: "150 عملة", en: "150 coins" },
+  { tier: 2, ar: "ضمادة ×5", en: "Bandage ×5" },
+  { tier: 3, ar: "لون اسم تجريبي", en: "Preview name color" },
+  { tier: 4, ar: "صندوق موارد", en: "Resource crate" },
+  { tier: 5, ar: "شارة الموسم", en: "Season badge" },
+];
 const NOTES = {
   ar: [
     "كل سيرفر يحفظ تقدمك لوحده عند الدخول.",
     "القفل بكود من 4 أرقام للباب والصندوق.",
     "حلقة الباب بحجم الجدار، والموارد مجمّعة في بقع.",
+    "عملات المتجر ومسار الموسم أرقام تجريبية إلى أن يُربط الدفع.",
   ],
   en: [
     "Each server keeps your progress and restores it when you enter.",
     "Doors and crates take a 4-digit lock.",
     "Door frames match wall size. Resources sit in groves.",
+    "Shop coins and the season track are preview numbers until payments are connected.",
   ],
 };
 
@@ -64,6 +87,7 @@ export function MainMenu({
   muted,
   setMuted,
   founder,
+  guestName,
 }: {
   onPlay: (training: boolean) => void;
   booting: boolean;
@@ -74,6 +98,7 @@ export function MainMenu({
   muted: boolean;
   setMuted: (v: boolean) => void;
   founder: ReactNode;
+  guestName: string;
 }) {
   const lang = useGameStore((s) => s.lang);
   const serverId = useGameStore((s) => s.serverId);
@@ -146,16 +171,20 @@ export function MainMenu({
           </div>
           <div className="mx-auto hidden text-center sm:block">
             <p className="text-sm font-bold" style={{ color: profile?.nameColor || "#fff" }}>
-              {profile?.username || (lang === "ar" ? "ضيف" : "Guest")}
+              {profile?.username || guestName}
             </p>
             <p className="text-[11px] text-muted">
               {lang === "ar" ? "مستوى" : "Lv"} {level} · XP {xp}
               {profile?.isAdmin ? ` · ${copy.adminBadge}` : ""}
             </p>
+            <p className="text-[10px] text-sand">
+              {lang === "ar" ? "عملات" : "Coins"} {PREVIEW.coins} · {lang === "ar" ? "جواهر" : "Gems"} {PREVIEW.gems}
+              <span className="text-muted"> · {lang === "ar" ? "أرقام تجريبية" : "preview numbers"}</span>
+            </p>
           </div>
           <div className="ms-auto flex items-center gap-2">
             <span className="rounded-full border border-line px-2 py-1 text-[11px] text-sand">
-              {signedIn ? (lang === "ar" ? "الحساب متصل" : "Account online") : lang === "ar" ? "بدون حساب" : "Offline account"}
+              {signedIn ? (lang === "ar" ? "الحساب متصل" : "Account online") : lang === "ar" ? `أونلاين · ${guestName}` : `Online · ${guestName}`}
             </span>
             <button type="button" className="rounded-lg border border-line px-2 py-1 text-xs" onClick={() => setTab("shop")}>
               {lang === "ar" ? "المتجر" : "Shop"}
@@ -274,9 +303,14 @@ export function MainMenu({
             )}
 
             {tab === "pass" && (
-              <QuestList copy={copy} save={save} note={lang === "ar" ? "هذا مسار المهام الحالي. لا يوجد اشتراك موسمي مدفوع." : "This is the live quest track. There is no paid season pass."} />
+              <QuestList
+                copy={copy}
+                save={save}
+                lang={lang}
+                note={lang === "ar" ? "المكافآت أعلاه تجريبية. المهام تحتها من حفظك الحقيقي." : "The rewards above are preview data. Quests below come from your real save."}
+              />
             )}
-            {tab === "quests" && <QuestList copy={copy} save={save} />}
+            {tab === "quests" && <QuestList copy={copy} save={save} lang={lang} />}
 
             {tab === "clans" && (
               <div className="space-y-2 text-sm">
@@ -427,15 +461,31 @@ function QuestList({
   copy,
   save,
   note,
+  lang,
 }: {
   copy: (typeof COPY)["ar"] | (typeof COPY)["en"];
   save: SaveSnap | null;
   note?: string;
+  lang: "ar" | "en";
 }) {
   return (
     <div className="space-y-2">
-      <h2 className="text-lg font-bold">{note ? "" : ""}</h2>
       {note && <p className="text-xs text-muted">{note}</p>}
+      {note && (
+        <>
+          <p className="text-xs text-sand">
+            {lang === "ar" ? "الموسم التجريبي" : "Preview season"} {PREVIEW.passTier}/{PREVIEW.passMax}
+          </p>
+          {PASS_PREVIEW.map((step) => (
+            <div key={step.tier} className="flex justify-between rounded-xl border border-line px-3 py-2 text-sm">
+              <span>
+                {step.tier}. {lang === "ar" ? step.ar : step.en}
+              </span>
+              <span className="text-muted">{step.tier <= PREVIEW.passTier ? "✓" : "·"}</span>
+            </div>
+          ))}
+        </>
+      )}
       {copy.quests.map((q) => {
         const cur = save?.quests?.[q.id] ?? 0;
         const pct = Math.min(100, Math.round((cur / q.target) * 100));
@@ -471,6 +521,25 @@ function Shop({
   return (
     <div className="space-y-3 text-sm">
       <h2 className="text-lg font-bold">{lang === "ar" ? "المتجر" : "Shop"}</h2>
+      <div className="rounded-xl border border-line bg-raised/70 p-3">
+        <p className="font-bold">{lang === "ar" ? "كتالوج تجريبي" : "Preview catalog"}</p>
+        <p className="mt-1 text-[11px] text-muted">
+          {lang === "ar" ? "العناصر التالية شكل فقط. الشراء سيُربط لاحقاً ولا يمنح شيئاً الآن." : "These cards are placeholders. Buying does nothing until payments are connected."}
+        </p>
+        <div className="mt-2 space-y-2">
+          {SHOP_PREVIEW.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              className="flex w-full items-center justify-between rounded-xl border border-line px-3 py-2 text-start"
+              onClick={() => setMsg(lang === "ar" ? "سيُفعّل الشراء لاحقاً" : "Purchases will be enabled later")}
+            >
+              <span>{lang === "ar" ? item.ar : item.en}</span>
+              <span className="text-sand">{item.price}</span>
+            </button>
+          ))}
+        </div>
+      </div>
       <div className="rounded-xl border border-amber/40 bg-raised/70 p-3">
         <p className="font-bold">{lang === "ar" ? "عضوية الاسم" : "Name membership"}</p>
         <p className="mt-1 text-xs text-muted">{price}</p>

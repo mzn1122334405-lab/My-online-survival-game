@@ -34,6 +34,8 @@ export type ItemId =
   | "arrows"
   | "pistol"
   | "rifle"
+  | "gunBarrel"
+  | "spring"
   | "grenade"
   | "ammo"
   | "spear"
@@ -100,6 +102,8 @@ export const ITEM: Record<ItemId, ItemDef> = {
   arrows: { id: "arrows", icon: "/icons/arrows.png", stack: 1000, kind: "none" },
   pistol: { id: "pistol", icon: "/icons/pistol.png", stack: 1, kind: "gun", damage: 38, range: 70, cooldown: 0.28, ammo: "ammo" },
   rifle: { id: "rifle", icon: "/icons/rifle.png", stack: 1, kind: "gun", damage: 52, range: 95, cooldown: 0.12, ammo: "ammo" },
+  gunBarrel: { id: "gunBarrel", icon: "/icons/gunBarrel.png", stack: 20, kind: "none" },
+  spring: { id: "spring", icon: "/icons/spring.png", stack: 20, kind: "none" },
   grenade: { id: "grenade", icon: "/icons/grenade.png", stack: 1000, kind: "throw", damage: 80, range: 28, cooldown: 0.9 },
   ammo: { id: "ammo", icon: "/icons/ammo.png", stack: 1000, kind: "none" },
   spear: { id: "spear", icon: "/icons/spear.png", stack: 1, kind: "melee", damage: 28, range: 3.2, cooldown: 0.65 },
@@ -156,8 +160,8 @@ export const RECIPES: Recipe[] = [
   { id: "plant", out: "plant", count: 1, station: "hand", cost: { wood: 4, fiber: 6, herbs: 2 } },
   { id: "lock", out: "lock", count: 1, station: "hand", cost: { iron: 2 } },
   { id: "armor", out: "armor", count: 1, station: "bench", cost: { cloth: 4, ironIngot: 3 } },
-  { id: "pistol", out: "pistol", count: 1, station: "bench", cost: { ironIngot: 8, wood: 4, sulfur: 2 } },
-  { id: "rifle", out: "rifle", count: 1, station: "bench", cost: { ironIngot: 12, wood: 6, sulfur: 4 } },
+  { id: "pistol", out: "pistol", count: 1, station: "bench", cost: { gunBarrel: 1, wood: 3, iron: 2 } },
+  { id: "rifle", out: "rifle", count: 1, station: "bench", cost: { gunBarrel: 1, spring: 1, wood: 6 } },
   { id: "ammo", out: "ammo", count: 8, station: "bench", cost: { ironIngot: 1, sulfur: 1, coal: 1 } },
   { id: "grenade", out: "grenade", count: 1, station: "bench", cost: { ironIngot: 2, sulfur: 4 } },
   { id: "cookedMeat", out: "cookedMeat", count: 1, station: "fire", cost: { meat: 1 } },
@@ -227,7 +231,7 @@ export const COPY = {
     stationFurnace: "فرن",
     stationBench: "طاولة عمل",
     north: "ش",
-    controls: "حركة WASD · قفز مسافة · ركض Shift · عجلة الفأرة تبدّل الأداة · مراوغة Q · صد F · تفاعل E · مخزون Tab · حرف C · بناء B · خريطة M · دردشة T",
+    controls: "حركة WASD · قفز مسافة · ركض Shift · عجلة الفأرة تبدّل الأداة · G يرمي القطعة المحددة كيسًا · مراوغة Q · صد F · تفاعل E · مخزون Tab · حرف C · بناء B · خريطة M · دردشة T",
     drink: "اشرب من الماء",
     chop: "اقطع",
     mine: "عدّن",
@@ -248,7 +252,7 @@ export const COPY = {
     login: "تسجيل الدخول",
     signup: "حساب جديد",
     account: "الحساب",
-    guest: "ضيف — العب محلياً",
+    guest: "أونلاين كضيف",
     online: "أونلاين",
     chat: "الدردشة",
     players: "لاعبون",
@@ -321,6 +325,8 @@ export const COPY = {
       arrows: "سهام",
       pistol: "مسدس",
       rifle: "بندقية",
+      gunBarrel: "ماسورة",
+      spring: "سبرنج",
       grenade: "قنبلة",
       ammo: "ذخيرة",
       spear: "رمح",
@@ -386,7 +392,7 @@ export const COPY = {
     stationFurnace: "Furnace",
     stationBench: "Workbench",
     north: "N",
-    controls: "WASD move · Space jump · Shift sprint · mouse wheel switches item · Q dodge · F block · E interact · Tab inventory · C craft · B build · M map · T chat",
+    controls: "WASD move · Space jump · Shift sprint · mouse wheel switches item · G drops the selected stack as a bag · Q dodge · F block · E interact · Tab inventory · C craft · B build · M map · T chat",
     drink: "Drink from water",
     chop: "Chop",
     mine: "Mine",
@@ -407,7 +413,7 @@ export const COPY = {
     login: "Sign in",
     signup: "Create account",
     account: "Account",
-    guest: "Guest — play locally",
+    guest: "Online as guest",
     online: "Online",
     chat: "Chat",
     players: "Players",
@@ -480,6 +486,8 @@ export const COPY = {
       arrows: "Arrows",
       pistol: "Pistol",
       rifle: "Rifle",
+      gunBarrel: "Gun barrel",
+      spring: "Spring",
       grenade: "Grenade",
       ammo: "Ammo",
       spear: "Spear",

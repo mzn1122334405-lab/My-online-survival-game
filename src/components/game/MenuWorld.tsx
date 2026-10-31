@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import * as THREE from "three";
-import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { pineGeometry } from "@/game/pine";
 import { OUTFITS } from "@/game/data";
 
 export function MenuWorld({ outfit, reduce }: { outfit: number; reduce: boolean }) {
@@ -67,26 +68,15 @@ export function MenuWorld({ outfit, reduce }: { outfit: number; reduce: boolean 
       scout.add(mesh);
     }).catch(() => undefined);
 
-    void loader.loadAsync("/models/palm.glb").then((gltf) => {
-      if (dead) return;
-      const spots: [number, number, number][] = [
-        [-6, 0, -3],
-        [-4.2, 0, 4.5],
-        [5.5, 0, -4],
-        [7, 0, 2.4],
-        [-8, 0, 1],
-      ];
-      for (const [x, , z] of spots) {
-        const tree = gltf.scene.clone(true);
-        const box = new THREE.Box3().setFromObject(tree);
-        const h = Math.max(0.01, box.max.y - box.min.y);
-        const s = 4.2 / h;
-        tree.scale.setScalar(s);
-        tree.position.set(x, -box.min.y * s, z);
-        tree.rotation.y = x;
-        scene.add(tree);
-      }
-    }).catch(() => undefined);
+    const pineMat = new THREE.MeshStandardMaterial({ roughness: 0.86, vertexColors: true });
+    const pineGeo = pineGeometry();
+    for (const [x, z, s] of [[-6, -3, 4.4], [-4.2, 4.5, 3.6], [5.5, -4, 4.8], [7, 2.4, 3.8], [-8, 1, 3.2]] as const) {
+      const tree = new THREE.Mesh(pineGeo, pineMat);
+      tree.scale.setScalar(s);
+      tree.position.set(x, 0, z);
+      tree.rotation.y = x;
+      scene.add(tree);
+    }
 
     void loader.loadAsync("/models/rock_l.glb").then((gltf) => {
       if (dead) return;

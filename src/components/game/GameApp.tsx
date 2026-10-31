@@ -21,6 +21,7 @@ import { UserButton } from "@/lib/auth/gates";
 import { useCurrentUserState } from "@/lib/auth/use-current-user";
 import { addAdmin, enterServer, getMyProfile, listAdmins, loadProgress, saveProgress, upsertProfile, type Profile } from "@/game/online";
 import { MainMenu } from "./MainMenu";
+import { OnlineSession } from "./OnlineSession";
 
 function fmtTime(s: number) {
   const m = Math.floor(s / 60);
@@ -69,6 +70,22 @@ export function GameApp() {
   const copy = COPY[lang];
   const { user, isPending } = useCurrentUserState();
   const [playError, setPlayError] = useState("");
+  const [guestName] = useState(() => {
+    try {
+      const saved = sessionStorage.getItem("tribals-guest");
+      if (saved && /^Gust\d{4}$/.test(saved)) return saved;
+    } catch {
+      /* ignore */
+    }
+    const name = `Gust${Math.floor(1000 + Math.random() * 9000)}`;
+    try {
+      sessionStorage.setItem("tribals-guest", name);
+    } catch {
+      /* ignore */
+    }
+    return name;
+  });
+  const [profile, setProfile] = useState<Profile | null>(null);
 
   useEffect(() => {
     const id = useGameStore.getState().serverId;
@@ -96,24 +113,31 @@ export function GameApp() {
   }, [user, isPending]);
 
   async function begin(training: boolean, load: boolean) {
+    setPlayError("");
     const canvas = canvasRef.current;
     if (!canvas) return;
     const chosen = useGameStore.getState().serverId;
     const srv = SERVERS.find((s) => s.id === chosen);
     if (srv?.adminOnly && !user) {
-      useGameStore.getState().toast(t().czarOnly);
+      const msg = t().czarOnly;
+      setPlayError(msg);
+      useGameStore.getState().toast(msg);
       return;
     }
     if (user) {
       try {
         const gate = await enterServer({ data: chosen });
         if (!gate.ok) {
-          useGameStore.getState().toast(gate.reason === "banned" ? t().banned : t().czarOnly);
+          const msg = gate.reason === "banned" ? t().banned : t().czarOnly;
+          setPlayError(msg);
+          useGameStore.getState().toast(msg);
           return;
         }
       } catch {
         if (srv?.adminOnly) {
-          useGameStore.getState().toast(t().czarOnly);
+          const msg = t().czarOnly;
+          setPlayError(msg);
+          useGameStore.getState().toast(msg);
           return;
         }
       }
@@ -142,6 +166,8 @@ export function GameApp() {
       eng.audio.setMuted(muted);
     } catch (err) {
       console.error(err);
+      const msg = err instanceof Error ? err.message : String(err);
+      setPlayError(msg);
       (window as unknown as { __tribalsError?: string }).__tribalsError = err instanceof Error ? err.stack ?? err.message : String(err);
     } finally {
       setBooting(false);
@@ -167,16 +193,30 @@ export function GameApp() {
         className="absolute inset-0 h-full w-full touch-none"
         onClick={onCanvasClick}
       />
-      {screen === "menu" && <Menu onPlay={begin} booting={booting} userPending={isPending} signedIn={!!user} profile={profile} />}
+      {screen === "menu" && (
+        <MainMenu
+          onPlay={(training) => void begin(training, false)}
+          booting={booting}
+          playError={playError}
+          userPending={isPending}
+          signedIn={!!user}
+          profile={profile}
+          muted={muted}
+          setMuted={setMuted}
+          founder={<FounderPanel />}
+          guestName={guestName}
+        />
+      )}
       {screen !== "menu" && <Hud muted={muted} setMuted={setMuted} engine={engineRef} />}
-      {screen === "playing" && profile && (
+      {screen === "playing" && (
         <OnlineSession
-          key={serverId}
+          key={`${serverId}:${profile?.username ?? guestName}`}
           engine={engineRef}
-          username={profile.username}
-          isAdmin={profile.isAdmin}
-          nameColor={profile.nameColor}
-          canColor={profile.isAdmin || profile.premium}
+          username={profile?.username ?? guestName}
+          isAdmin={!!profile?.isAdmin}
+          nameColor={profile?.nameColor ?? "#ffffff"}
+          canColor={!!profile && (profile.isAdmin || profile.premium)}
+          guest={!profile}
           room={`tribals-${serverId}`}
         />
       )}
@@ -513,6 +553,11 @@ function Hud({
           );
         })}
       </div>
+      {inv[INV_SIZE + hot] && (
+        <p className="pointer-events-none absolute bottom-16 left-1/2 z-10 -translate-x-1/2 text-xs font-semibold text-foam/90 sm:bottom-20">
+          {copy.items[inv[INV_SIZE + hot]!.id]}
+        </p>
+      )}
       <div className="absolute bottom-3 right-3 z-10 flex gap-2 sm:bottom-5 sm:right-5">
         <IconBtn
           onClick={() => {
@@ -925,6 +970,13 @@ function BagOverlay({ engine }: { engine: MutableRefObject<TribalsEngine | null>
           <BagSlots engine={engine} start={0} count={INV_SIZE} hold={hold} setHold={setHold} />
           <p className="mb-1 mt-3 text-xs font-semibold text-amber">{copy.hotbar}</p>
           <BagSlots engine={engine} start={INV_SIZE} count={HOTBAR} hold={hold} setHold={setHold} />
+          <button
+            type="button"
+            className="mt-2 rounded-lg border border-line px-3 py-2 text-xs font-semibold"
+            onClick={() => engine.current?.dropSelected()}
+          >
+            {s.lang === "ar" ? "ارمي القطعة المحددة كيسًا" : "Drop selected stack as a bag"}
+          </button>
         </div>
         <div className="w-full overflow-auto sm:w-80">
           <h3 className="mb-2 font-bold">{copy.craft}</h3>
@@ -938,7 +990,7 @@ function BagOverlay({ engine }: { engine: MutableRefObject<TribalsEngine | null>
                   : copy.stationHand}
           </p>
           <div className="flex max-h-48 flex-col gap-1 overflow-auto">
-            {RECIPES.map((r) => (
+            {RECIPES.filter((r) => r.station === "hand" || r.station === s.nearStation).map((r) => (
               <button
                 key={r.id}
                 type="button"

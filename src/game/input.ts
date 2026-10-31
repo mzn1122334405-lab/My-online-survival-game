@@ -11,6 +11,7 @@ export type Actions = {
   reload: boolean;
   dodge: boolean;
   block: boolean;
+  drop: boolean;
   wheel: number;
 };
 
@@ -24,6 +25,7 @@ export class Input {
   interactClick = false;
   jumpClick = false;
   dodgeClick = false;
+  dropClick = false;
   blockHeld = false;
   wheel = 0;
   touchMoveX = 0;
@@ -121,6 +123,7 @@ export class Input {
     this.blockHeld = false;
     this.fireClick = false;
     this.dodgeClick = false;
+    this.dropClick = false;
     this.jumpClick = false;
     this.interactClick = false;
     this.lookX = 0;
@@ -136,6 +139,7 @@ export class Input {
     if (e.code === "KeyE") this.interactClick = true;
     if (e.code === "Space") this.jumpClick = true;
     if (e.code === "KeyQ") this.dodgeClick = true;
+    if (e.code === "KeyG") this.dropClick = true;
   };
   private ku = (e: KeyboardEvent) => {
     this.keys.delete(e.code);
@@ -244,10 +248,12 @@ export class Input {
     const interact = this.interactClick || src.has("KeyE");
     const jump = this.jumpClick || src.has("Space");
     const dodge = this.dodgeClick;
+    const drop = this.dropClick;
     this.fireClick = false;
     this.interactClick = false;
     this.jumpClick = false;
     this.dodgeClick = false;
+    this.dropClick = false;
     const wheel = this.wheel;
     this.wheel = 0;
     return {
@@ -262,6 +268,7 @@ export class Input {
       interact,
       reload: src.has("KeyR"),
       dodge,
+      drop,
       block: this.blockHeld || src.has("KeyF"),
       wheel,
     };

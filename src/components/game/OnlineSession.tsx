@@ -3,7 +3,7 @@ import { MessageSquare, Users } from "lucide-react";
 import { useP2PRoom } from "@/lib/multiplayer";
 import { COPY, NAME_COLORS } from "@/game/data";
 import { useGameStore } from "@/game/store";
-import { listChat, moderation, sendChat, setNameColor, type ChatRow } from "@/game/online";
+import { listPublicChat, moderation, sendChat, sendGuestChat, setNameColor, type ChatRow } from "@/game/online";
 import type { TribalsEngine } from "@/game/engine";
 
 type Props = {
@@ -12,10 +12,11 @@ type Props = {
   isAdmin: boolean;
   nameColor: string;
   canColor: boolean;
+  guest?: boolean;
   room: string;
 };
 
-export function OnlineSession({ engine, username, isAdmin, nameColor, canColor, room }: Props) {
+export function OnlineSession({ engine, username, isAdmin, nameColor, canColor, guest, room }: Props) {
   const p2p = useP2PRoom({ room, name: username });
   const lang = useGameStore((s) => s.lang);
   const copy = COPY[lang];
@@ -33,15 +34,28 @@ export function OnlineSession({ engine, username, isAdmin, nameColor, canColor, 
     engine.current?.setAdmin(isAdmin);
     engine.current?.setNameColor(mine);
     engine.current?.setCombatSend((msg) => p2p.send(msg));
+    engine.current?.setNetSend((msg) => p2p.send(msg));
   }, [engine, username, isAdmin, mine, p2p.send]);
 
   useEffect(() => {
-    listChat()
-      .then(setChat)
-      .catch(() => setChat([]));
+    let stop = false;
+    const pull = () => {
+      listPublicChat()
+        .then((rows) => {
+          if (!stop) setChat(rows);
+        })
+        .catch(() => undefined);
+    };
+    pull();
+    const id = window.setInterval(pull, 4000);
+    return () => {
+      stop = true;
+      window.clearInterval(id);
+    };
   }, []);
 
   useEffect(() => {
+    if (guest) return;
     let stop = false;
     const boot = async () => {
       try {
@@ -76,7 +90,7 @@ export function OnlineSession({ engine, username, isAdmin, nameColor, canColor, 
       useGameStore.getState().setScreen("menu");
       useGameStore.getState().toast(msg);
     }
-  }, [copy.banned, copy.kicked, engine]);
+  }, [copy.banned, copy.kicked, engine, guest]);
 
   useEffect(
     () =>
@@ -111,6 +125,13 @@ export function OnlineSession({ engine, username, isAdmin, nameColor, canColor, 
         if (msg.t === "hide") {
           engine.current?.dropRemote(from);
         }
+        if (msg.t === "build") engine.current?.applyNetBuild(msg);
+        if (msg.t === "builds" && Array.isArray(msg.items)) {
+          for (const item of msg.items) engine.current?.applyNetBuild(item);
+        }
+        if (msg.t === "bag") engine.current?.applyBag(msg);
+        if (msg.t === "take" && typeof msg.key === "string") engine.current?.applyTake(msg.key);
+        if (msg.t === "barrel" && typeof msg.i === "number") engine.current?.applyBarrel(msg.i);
         if (msg.t === "chat" && typeof msg.body === "string") {
           setLive((rows) => [
             ...rows.slice(-30),
@@ -141,7 +162,14 @@ export function OnlineSession({ engine, username, isAdmin, nameColor, canColor, 
       raf = requestAnimationFrame(loop);
     };
     raf = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(raf);
+    const syncBuilds = window.setInterval(() => {
+      const items = engine.current?.sharedBuilds();
+      if (items && items.length) p2p.send({ t: "builds", items });
+    }, 2000);
+    return () => {
+      cancelAnimationFrame(raf);
+      window.clearInterval(syncBuilds);
+    };
   }, [p2p.broadcast, engine]);
 
   useEffect(() => {
@@ -162,6 +190,16 @@ export function OnlineSession({ engine, username, isAdmin, nameColor, canColor, 
     const text = draft.trim();
     if (!text) return;
     setDraft("");
+    if (guest) {
+      if (text.startsWith("/")) {
+        useGameStore.getState().toast(lang === "ar" ? "الأوامر للحسابات فقط" : "Commands need an account");
+        return;
+      }
+      p2p.send({ t: "chat", from: username, body: text, color: "#ffffff" });
+      setLive((rows) => [...rows.slice(-30), { from: username, body: text, color: "#ffffff" }]);
+      void sendGuestChat({ data: { name: username, text } }).catch(() => undefined);
+      return;
+    }
     try {
       const res = await sendChat({ data: text });
       if (res.kind === "give" && engine.current) {
@@ -190,7 +228,7 @@ export function OnlineSession({ engine, username, isAdmin, nameColor, canColor, 
       } else {
         p2p.send({ t: "chat", from: username, body: text, color: mine });
         setLive((rows) => [...rows.slice(-30), { from: username, body: text, color: mine }]);
-        const latest = await listChat();
+        const latest = await listPublicChat();
         setChat(latest);
       }
     } catch {

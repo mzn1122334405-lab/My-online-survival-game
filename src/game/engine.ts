@@ -1,6 +1,8 @@
 import * as THREE from "three";
 import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { pineGeometry } from "@/game/pine";
+import { createHand, type HandRig } from "@/game/hand";
 import { createNoise2D } from "simplex-noise";
 import {
   EYE,
@@ -83,6 +85,8 @@ type Build = {
   code?: string;
   owners?: string[];
   bottom?: number;
+  key?: string;
+  shared?: boolean;
 };
 
 type RemotePawn = {
@@ -95,7 +99,8 @@ type RemotePawn = {
   radius: number;
 };
 
-type Drop = { mesh: THREE.Object3D; id: ItemId; n: number; life: number };
+type Drop = { mesh: THREE.Object3D; id: ItemId; n: number; life: number; key?: string };
+type Barrel = { mesh: THREE.Group; x: number; y: number; z: number; hp: number; alive: boolean };
 type Bullet = {
   mesh: THREE.Mesh;
   vel: THREE.Vector3;
@@ -214,6 +219,13 @@ export class TribalsEngine {
   rainT = 40;
   bob = 0;
   swing = 0;
+  kick = 0;
+  land = 0;
+  swayX = 0;
+  swayY = 0;
+  fovKick = 0;
+  prevYaw = 0;
+  prevPitch = 0;
   fireCd = 0;
   stepT = 0;
   harvestT = 0;
@@ -257,11 +269,15 @@ export class TribalsEngine {
   water: THREE.Mesh;
   terrainMat: THREE.ShaderMaterial;
   weapon: THREE.Group;
+  hand: HandRig | null = null;
   ghost: THREE.Mesh;
   inst: InstProps[] = [];
   creatures: Creature[] = [];
   builds: Build[] = [];
   drops: Drop[] = [];
+  barrels: Barrel[] = [];
+  dropSeq = 1;
+  dropCd = 0;
   bullets: Bullet[] = [];
   rain: THREE.Points;
   tracers: { mesh: THREE.Line; t: number }[] = [];
@@ -280,6 +296,9 @@ export class TribalsEngine {
   saveT = 0;
   nearStation: Station = "hand";
   buildId = 1;
+  worldId = "";
+  seenBuild = new Set<string>();
+  netSend: ((msg: unknown) => void) | null = null;
   creatId = 1;
   woodMat: THREE.MeshStandardMaterial;
   leafMat: THREE.MeshStandardMaterial;
@@ -374,6 +393,8 @@ export class TribalsEngine {
     this.mapCanvas.height = 160;
     this.wcam.position.set(0, 0, 0);
     this.wscene.add(this.wcam);
+    this.wcam.add(new THREE.DirectionalLight(0xfff2df, 1.45).translateX(-0.6).translateY(0.9).translateZ(0.4));
+    this.wscene.add(new THREE.AmbientLight(0xb7c4d4, 0.72));
     this.weapon.position.set(0.32, -0.28, -0.55);
     this.wcam.add(this.weapon);
   }
@@ -396,6 +417,7 @@ export class TribalsEngine {
     window.addEventListener("resize", this.resize);
     this.input.attach();
     this.audio.unlock();
+    if (!this.worldId) this.worldId = Math.random().toString(36).slice(2, 10);
     if (opts.load && !this.loadSave()) this.resetPlayer(true);
     else if (!opts.load) this.resetPlayer(true);
     this.wireControlsTest();
@@ -562,6 +584,9 @@ export class TribalsEngine {
         this.solids[n] = found;
       }),
     );
+    const pine = new THREE.Mesh(pineGeometry(), new THREE.MeshStandardMaterial({ roughness: 0.86, metalness: 0.02, vertexColors: true }));
+    this.dress(pine, 0);
+    this.solids.pineTree = pine;
   }
 
   private hgt(x: number, z: number) {
@@ -631,6 +656,7 @@ export class TribalsEngine {
     this.scene.add(this.water);
 
     this.scatter();
+    this.placeBarrels();
     this.spawnFauna();
     this.makeCamps();
     this.placeBoats();
@@ -767,10 +793,10 @@ export class TribalsEngine {
       });
     };
 
-    grove("oak", "tree", 7.2, 8.6, ring(-42, 22, 4, 12), 95, "wood", "fiber", 0.7);
-    grove("pine", "tree", 5.4, 9.8, ring(-30, 32, 3, 10), 85, "wood", "coal", 0.55);
-    grove("palm", "tree", 6.6, 10.4, ring(62, 46, 2, 8), 75, "wood", "fiber", 0.55);
-    grove("dead", "tree", 4.8, 8.0, ring(-50, 8, 1, 4), 50, "wood", "coal", 0.4);
+    grove("pineTree", "tree", 7.2, 8.6, ring(-42, 22, 4, 12), 95, "wood", "fiber", 0.7);
+    grove("pineTree", "tree", 5.4, 9.8, ring(-30, 32, 3, 10), 85, "wood", "coal", 0.55);
+    grove("pineTree", "tree", 6.6, 10.4, ring(62, 46, 2, 8), 75, "wood", "fiber", 0.55);
+    grove("pineTree", "tree", 4.8, 8.0, ring(-50, 8, 1, 4), 50, "wood", "coal", 0.4);
 
     grove("rock_s", "rock", 1.9, 1.45, ring(48, -38, 4, 9), 40, "stone", "coal", 0.55);
     grove("rock_m", "rock", 2.7, 2.1, ring(46, -28, 3, 8), 70, "stone", "iron", 0.75);
@@ -1341,16 +1367,16 @@ export class TribalsEngine {
 
   private buildWeapon(id: ItemId | "fists") {
     this.weapon.clear();
+    this.hand = createHand();
+    this.weapon.add(this.hand.mesh);
+    if (id === "fists") {
+      this.hand.pose("idle", 0, 0, 0);
+      return;
+    }
+    this.hand.mesh.position.set(0.04, -0.04, 0.08);
+    this.hand.pose("grip", 0, 0, 0);
     const wood = new THREE.MeshStandardMaterial({ color: 0x8b6239, roughness: 0.8 });
     const metal = new THREE.MeshStandardMaterial({ color: 0x9aa3ad, metalness: 0.6, roughness: 0.35 });
-    const dark = new THREE.MeshStandardMaterial({ color: 0x222, roughness: 0.5 });
-    const skin = this.armMat;
-    const arm = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.12, 0.42), skin);
-    arm.position.set(-0.18, -0.06, 0.12);
-    this.weapon.add(arm);
-    const arm2 = arm.clone();
-    arm2.position.set(0.08, -0.08, 0.18);
-    this.weapon.add(arm2);
     const add = (mesh: THREE.Mesh, x: number, y: number, z: number) => {
       mesh.position.set(x, y, z);
       this.weapon.add(mesh);
@@ -1384,12 +1410,33 @@ export class TribalsEngine {
       b.rotation.y = Math.PI / 2;
       add(b, 0.12, 0.0, -0.35);
     } else if (id === "pistol") {
-      add(new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.1, 0.28), dark), 0.14, -0.02, -0.32);
-      add(new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.16, 0.08), dark), 0.14, -0.12, -0.18);
+      const steel = new THREE.MeshStandardMaterial({ color: 0x5e656c, metalness: 0.62, roughness: 0.32 });
+      const brass = new THREE.MeshStandardMaterial({ color: 0xd4a24a, metalness: 0.55, roughness: 0.38 });
+      const gripMat = new THREE.MeshStandardMaterial({ color: 0x6a3a22, roughness: 0.72 });
+      const grip = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.18, 0.09), gripMat);
+      grip.rotation.x = 0.35;
+      add(grip, 0.14, -0.12, -0.16);
+      add(new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.08, 0.12), brass), 0.14, -0.02, -0.2);
+      const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.028, 0.032, 0.22, 8), steel);
+      barrel.rotation.x = Math.PI / 2;
+      add(barrel, 0.14, 0.02, -0.36);
+      const flare = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.03, 0.07, 8), steel);
+      flare.rotation.x = Math.PI / 2;
+      add(flare, 0.14, 0.02, -0.5);
+      add(new THREE.Mesh(new THREE.TorusGeometry(0.045, 0.01, 6, 10), steel), 0.14, 0.02, -0.53);
     } else if (id === "rifle") {
-      add(new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.1, 0.72), dark), 0.12, -0.02, -0.45);
-      add(new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.16, 0.08), wood), 0.12, -0.12, -0.12);
-      add(new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, 0.28, 6), metal), 0.12, 0.0, -0.85);
+      const steel = new THREE.MeshStandardMaterial({ color: 0x4a403c, metalness: 0.4, roughness: 0.45 });
+      const stock = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.09, 0.42), wood);
+      stock.rotation.x = -0.08;
+      add(stock, 0.12, -0.06, -0.18);
+      add(new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.14, 0.1), wood), 0.12, -0.12, -0.02);
+      const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.03, 0.62, 8), steel);
+      barrel.rotation.x = Math.PI / 2;
+      add(barrel, 0.12, 0.02, -0.55);
+      const flare = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.03, 0.1, 8), steel);
+      flare.rotation.x = Math.PI / 2;
+      add(flare, 0.12, 0.02, -0.9);
+      add(new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.06, 0.04), metal), 0.12, -0.02, -0.28);
     } else if (id === "grenade") {
       add(new THREE.Mesh(new THREE.SphereGeometry(0.08, 8, 6), new THREE.MeshStandardMaterial({ color: 0x3a6a32 })), 0.16, -0.02, -0.28);
     }
@@ -1517,6 +1564,69 @@ export class TribalsEngine {
 
   setCombatSend(fn: ((msg: { t: "hit"; to: string; dmg: number; head: boolean }) => void) | null) {
     this.combatSend = fn;
+  }
+
+  setNetSend(fn: ((msg: unknown) => void) | null) {
+    this.netSend = fn;
+  }
+
+  sharedBuilds() {
+    return this.builds.filter((b) => b.shared && b.key).map((b) => this.buildPacket(b));
+  }
+
+  applyNetBuild(raw: unknown) {
+    const b = raw as { key?: string; type?: ItemId; x?: number; y?: number; z?: number; rot?: number; code?: string; open?: boolean; owners?: string[] };
+    if (!b.key || typeof b.x !== "number" || typeof b.y !== "number" || typeof b.z !== "number") return;
+    if (!b.type || !this.knownBuild(b.type)) return;
+    const have = this.builds.find((x) => x.key === b.key);
+    if (have) {
+      if (b.code && !have.code) {
+        have.code = b.code;
+        have.owners = b.owners;
+        this.attachLockMesh(have);
+      }
+      if (b.open && have.type === "door" && !have.open) {
+        have.open = true;
+        const panel = have.mesh.getObjectByName("panel");
+        if (panel) panel.rotation.y = -Math.PI / 2;
+      }
+      return;
+    }
+    const built = this.placeBuild(b.type, new THREE.Vector3(b.x, b.y, b.z), b.rot ?? 0, false);
+    built.key = b.key;
+    built.shared = true;
+    built.code = b.code;
+    built.owners = b.owners;
+    this.seenBuild.add(b.key);
+    if (b.open && built.type === "door") {
+      built.open = true;
+      const panel = built.mesh.getObjectByName("panel");
+      if (panel) panel.rotation.y = -Math.PI / 2;
+    }
+    this.attachLockMesh(built);
+  }
+
+  private knownBuild(type: string) {
+    return ["foundation", "wall", "window", "door", "frame", "fence", "roof", "stairs", "crate", "furnace", "workbench", "campfire", "plant"].includes(type);
+  }
+
+  private buildPacket(b: Build) {
+    return {
+      key: b.key,
+      type: b.type,
+      x: Math.round(b.pos.x * 100) / 100,
+      y: Math.round(b.pos.y * 100) / 100,
+      z: Math.round(b.pos.z * 100) / 100,
+      rot: b.rot,
+      code: b.code,
+      owners: b.owners,
+      open: b.open,
+    };
+  }
+
+  private publishBuild(b: Build) {
+    if (!b.shared || !b.key) return;
+    this.netSend?.({ t: "build", ...this.buildPacket(b) });
   }
 
   applyIncoming(n: number, head: boolean) {
@@ -1698,6 +1808,7 @@ export class TribalsEngine {
     const inWater = terrain < WATER_Y - 0.05 && h < WATER_Y + 0.2;
     const targetY = inWater ? Math.max(h, WATER_Y - 0.9) : h;
     if (this.pos.y <= targetY + 0.08) {
+      if (!this.onGround && this.vel.y < -3) this.land = Math.min(1, -this.vel.y / 12);
       this.onGround = true;
       this.pos.y = targetY;
       this.vel.y = 0;
@@ -1789,6 +1900,7 @@ export class TribalsEngine {
     }
 
     this.fireCd = Math.max(0, this.fireCd - dt);
+    this.dropCd = Math.max(0, this.dropCd - dt);
     this.swing = Math.max(0, this.swing - dt * 3.5);
     this.hurtT = Math.max(0, this.hurtT - dt);
     this.updateCreatures(dt);
@@ -2119,6 +2231,7 @@ export class TribalsEngine {
 
   private markHit(head: boolean) {
     this.hitMark = 1;
+    this.kick = Math.min(1, this.kick + (head ? 0.85 : 0.4));
     useGameStore.getState().patch({ hitMark: 1, combo: this.combo });
     if (head) useGameStore.getState().toast(t().headshot);
   }
@@ -2257,9 +2370,13 @@ export class TribalsEngine {
       }
     }
 
+    if (act.drop && this.dropCd <= 0 && slot && this.overlay === "none") {
+      this.throwHeld(slot);
+    }
+
     if (act.fire && this.fireCd <= 0 && this.overlay === "none") {
       if (placeId && canPlace && placePos && slot) {
-        this.placeBuild(placeId, placePos, placeRot);
+        this.placeBuild(placeId, placePos, placeRot, true);
         const inv = useGameStore.getState().inventory.slice();
         takeItem(inv, slot.id, 1);
         useGameStore.getState().patch({ inventory: inv });
@@ -2274,7 +2391,9 @@ export class TribalsEngine {
         this.consume(def.id);
         this.fireCd = 0.4;
       } else {
-        this.fireWeapon(def, origin, look);
+        const barrel = this.pickBarrel(origin, look, 3.4);
+        if (barrel) this.hitBarrel(barrel);
+        else this.fireWeapon(def, origin, look);
       }
     }
     void dt;
@@ -2448,6 +2567,7 @@ export class TribalsEngine {
       b.code = code;
       b.owners = [this.netName || "local"];
       this.attachLockMesh(b);
+      this.publishBuild(b);
       useGameStore.getState().patch({ inventory: inv });
       useGameStore.getState().toast(t().lockOn);
       this.closeLock();
@@ -2476,6 +2596,7 @@ export class TribalsEngine {
     b.open = !b.open;
     const panel = b.mesh.getObjectByName("panel");
     if (panel) panel.rotation.y = b.open ? -Math.PI / 2 : 0;
+    this.publishBuild(b);
   }
 
   private attachLockMesh(b: Build) {
@@ -2629,7 +2750,7 @@ export class TribalsEngine {
     return b.top ?? null;
   }
 
-  private placeBuild(type: ItemId, pos: THREE.Vector3, rot: number) {
+  private placeBuild(type: ItemId, pos: THREE.Vector3, rot: number, shared = false) {
     const spec = this.buildSpec(type);
     const mesh = this.makeBuildMesh(type);
     const grounded = type === "door" || type === "fence" || type === "crate" || type === "campfire" || type === "plant" || type === "furnace" || type === "workbench";
@@ -2649,7 +2770,13 @@ export class TribalsEngine {
       bottom,
       top,
     };
+    if (shared) {
+      built.key = `${this.worldId}:${built.id}`;
+      built.shared = true;
+      this.seenBuild.add(built.key);
+    }
     this.builds.push(built);
+    if (shared) this.publishBuild(built);
     return built;
   }
 
@@ -2931,11 +3058,149 @@ export class TribalsEngine {
     return g;
   }
 
-  private spawnDrop(x: number, y: number, z: number, id: ItemId, n: number) {
-    const mesh = this.itemProp(id);
+  private spawnDrop(x: number, y: number, z: number, id: ItemId, n: number, share = false) {
+    const mesh = share ? this.clothBag() : this.itemProp(id);
     mesh.position.set(x + (this.rng() - 0.5) * 0.4, y + 0.05, z + (this.rng() - 0.5) * 0.4);
     this.scene.add(mesh);
-    this.drops.push({ mesh, id, n, life: 90 });
+    const key = share ? `${this.worldId || "local"}:d${this.dropSeq++}` : undefined;
+    this.drops.push({ mesh, id, n, life: share ? 180 : 90, key });
+    if (key) this.netSend?.({ t: "bag", key, id, n, x: mesh.position.x, y: mesh.position.y, z: mesh.position.z });
+  }
+
+  applyBag(raw: unknown) {
+    const b = raw as { key?: string; id?: ItemId; n?: number; x?: number; y?: number; z?: number };
+    if (!b.key || !b.id || !ITEM[b.id] || typeof b.x !== "number") return;
+    if (this.drops.some((d) => d.key === b.key)) return;
+    const mesh = this.clothBag();
+    mesh.position.set(b.x, b.y ?? 0.4, b.z ?? 0);
+    this.scene.add(mesh);
+    this.drops.push({ mesh, id: b.id, n: Math.max(1, Math.min(1000, b.n ?? 1)), life: 180, key: b.key });
+  }
+
+  applyTake(key: string) {
+    const d = this.drops.find((x) => x.key === key);
+    if (!d) return;
+    this.scene.remove(d.mesh);
+    this.disposeObj(d.mesh);
+    this.drops = this.drops.filter((x) => x !== d);
+  }
+
+  applyBarrel(i: number) {
+    const b = this.barrels[i];
+    if (!b?.alive) return;
+    b.alive = false;
+    this.scene.remove(b.mesh);
+  }
+
+  dropSelected() {
+    const slot = this.held();
+    if (!slot || this.dropCd > 0) return;
+    this.throwHeld(slot);
+  }
+
+  private throwHeld(slot: { id: ItemId; count: number }) {
+    const inv = useGameStore.getState().inventory.slice();
+    const n = slot.count;
+    if (!takeItem(inv, slot.id, n)) return;
+    useGameStore.getState().patch({ inventory: inv });
+    const x = this.pos.x - Math.sin(this.yaw) * 1.15;
+    const z = this.pos.z - Math.cos(this.yaw) * 1.15;
+    this.spawnDrop(x, this.pos.y + 0.35, z, slot.id, n, true);
+    this.dropCd = 0.45;
+    this.audio.place();
+  }
+
+  private clothBag() {
+    const g = new THREE.Group();
+    const cloth = new THREE.MeshStandardMaterial({ color: 0xd2c4a4, roughness: 0.95 });
+    const body = new THREE.Mesh(new THREE.SphereGeometry(0.16, 8, 6), cloth);
+    body.scale.set(1.05, 0.7, 0.86);
+    body.position.y = 0.12;
+    const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.07, 0.08, 6), cloth);
+    neck.position.y = 0.24;
+    const tie = new THREE.Mesh(new THREE.SphereGeometry(0.035, 6, 5), new THREE.MeshStandardMaterial({ color: 0x8a623c, roughness: 0.8 }));
+    tie.position.y = 0.29;
+    g.add(body, neck, tie);
+    return g;
+  }
+
+  private placeBarrels() {
+    const wood = new THREE.MeshStandardMaterial({ color: 0x7a5230, roughness: 0.86 });
+    const band = new THREE.MeshStandardMaterial({ color: 0x8d9296, metalness: 0.4, roughness: 0.42 });
+    let placed = 0;
+    for (let guard = 0; placed < 30 && guard < 500; guard++) {
+      const a = this.rng() * Math.PI * 2;
+      const r = 16 + this.rng() * 64;
+      const x = Math.cos(a) * r;
+      const z = Math.sin(a) * r;
+      const y = this.sample(x, z);
+      if (y < 0.45 || y > 5.5) continue;
+      if (x * x + (z - 86) * (z - 86) < 18 * 18) continue;
+      const g = new THREE.Group();
+      const body = new THREE.Mesh(new THREE.CylinderGeometry(0.36, 0.42, 0.92, 8), wood);
+      body.position.y = 0.46;
+      const lip = new THREE.Mesh(new THREE.CylinderGeometry(0.4, 0.4, 0.06, 8), band);
+      lip.position.y = 0.9;
+      const hoop = new THREE.Mesh(new THREE.TorusGeometry(0.4, 0.03, 5, 10), band);
+      hoop.rotation.x = Math.PI / 2;
+      hoop.position.y = 0.28;
+      const hoop2 = hoop.clone();
+      hoop2.position.y = 0.68;
+      g.add(body, lip, hoop, hoop2);
+      g.position.set(x, y, z);
+      g.rotation.y = this.rng() * Math.PI;
+      this.scene.add(g);
+      this.barrels.push({ mesh: g, x, y, z, hp: 36, alive: true });
+      placed++;
+    }
+  }
+
+  private pickBarrel(origin: THREE.Vector3, dir: THREE.Vector3, maxd: number) {
+    let best: Barrel | null = null;
+    let bestD = maxd;
+    for (const b of this.barrels) {
+      if (!b.alive) continue;
+      const cx = b.x - origin.x;
+      const cy = b.y + 0.5 - origin.y;
+      const cz = b.z - origin.z;
+      const t = cx * dir.x + cy * dir.y + cz * dir.z;
+      if (t < 0.3 || t > bestD) continue;
+      const px = origin.x + dir.x * t - b.x;
+      const py = origin.y + dir.y * t - (b.y + 0.5);
+      const pz = origin.z + dir.z * t - b.z;
+      if (px * px + py * py + pz * pz < 0.55 * 0.55) {
+        best = b;
+        bestD = t;
+      }
+    }
+    return best;
+  }
+
+  private hitBarrel(b: Barrel) {
+    b.hp -= 18;
+    this.swing = 1;
+    this.fireCd = 0.35;
+    this.audio.chop();
+    if (b.hp > 0) return;
+    b.alive = false;
+    this.scene.remove(b.mesh);
+    this.disposeObj(b.mesh);
+    const junk: [ItemId, number][] = [
+      ["wood", 4],
+      ["stone", 3],
+      ["fiber", 3],
+      ["coal", 2],
+      ["herbs", 2],
+      ["berries", 3],
+    ];
+    const first = Math.floor(this.rng() * junk.length);
+    let second = Math.floor(this.rng() * junk.length);
+    if (second === first) second = (second + 1) % junk.length;
+    this.spawnDrop(b.x, b.y + 0.5, b.z, junk[first][0], junk[first][1], true);
+    this.spawnDrop(b.x + 0.35, b.y + 0.45, b.z, junk[second][0], junk[second][1], true);
+    if (this.rng() < 0.04) this.spawnDrop(b.x - 0.2, b.y + 0.55, b.z + 0.2, "gunBarrel", 2, true);
+    if (this.rng() < 0.04) this.spawnDrop(b.x + 0.15, b.y + 0.55, b.z - 0.25, "spring", 2, true);
+    this.netSend?.({ t: "barrel", i: this.barrels.indexOf(b) });
   }
 
   private itemProp(id: ItemId) {
@@ -2996,6 +3261,7 @@ export class TribalsEngine {
     useGameStore.getState().patch({ inventory: inv });
     useGameStore.getState().toast(`${t().pickup} ${t().items[d.id]} ×${d.n}`);
     this.audio.pickup();
+    if (d.key) this.netSend?.({ t: "take", key: d.key });
     this.scene.remove(d.mesh);
     this.disposeObj(d.mesh);
     this.drops = this.drops.filter((x) => x !== d);
@@ -3086,11 +3352,26 @@ export class TribalsEngine {
   }
 
   private draw(dt: number) {
+    this.kick = Math.max(0, this.kick - dt * 5);
+    this.land = Math.max(0, this.land - dt * 3.2);
     const bobY = this.settings.headBob && this.onGround ? Math.sin(this.bob) * 0.045 : 0;
-    this.cam.position.set(this.pos.x, this.pos.y + this.eye + bobY, this.pos.z);
+    this.cam.position.set(this.pos.x, this.pos.y + this.eye + bobY - this.land * 0.07, this.pos.z);
     this.cam.rotation.order = "YXZ";
     this.cam.rotation.y = this.yaw;
-    this.cam.rotation.x = this.pitch;
+    this.cam.rotation.x = this.pitch - this.kick * 0.06 - Math.sin(this.land * Math.PI) * 0.05;
+    const sprinting = this.onGround && Math.hypot(this.vel.x, this.vel.z) > 6.2;
+    this.fovKick = THREE.MathUtils.damp(this.fovKick, sprinting ? 5 : 0, 5, dt);
+    const fov = this.settings.fov + this.fovKick;
+    if (Math.abs(this.cam.fov - fov) > 0.05) {
+      this.cam.fov = fov;
+      this.cam.updateProjectionMatrix();
+    }
+    const dyaw = Math.atan2(Math.sin(this.yaw - this.prevYaw), Math.cos(this.yaw - this.prevYaw));
+    const dpitch = this.pitch - this.prevPitch;
+    this.prevYaw = this.yaw;
+    this.prevPitch = this.pitch;
+    this.swayX = THREE.MathUtils.damp(this.swayX, THREE.MathUtils.clamp(-dyaw * 0.35, -0.06, 0.06), 7, dt);
+    this.swayY = THREE.MathUtils.damp(this.swayY, THREE.MathUtils.clamp(dpitch * 0.25, -0.04, 0.04), 7, dt);
     if (this.hurtT > 0) {
       this.cam.position.x += (this.rng() - 0.5) * 0.04;
       this.cam.position.y += (this.rng() - 0.5) * 0.03;
@@ -3138,9 +3419,21 @@ export class TribalsEngine {
       rp.needsUpdate = true;
     }
 
-    this.weapon.rotation.x = -this.swing * 0.7;
-    this.weapon.position.y = -0.28 - this.swing * 0.08;
-    this.weapon.position.x = 0.32 + Math.sin(this.bob) * 0.02;
+    const fists = this.weapon.userData.id === "fists";
+    const punch = fists ? this.swing : 0;
+    const bob = Math.sin(this.bob);
+    const side = Math.cos(this.bob);
+    this.weapon.rotation.x = (fists ? -0.2 - punch * 1.2 : -this.swing * 0.7) + this.swayY * 0.8;
+    this.weapon.rotation.y = this.swayX * 1.4 + (fists ? punch * 0.2 : 0);
+    this.weapon.rotation.z = fists ? bob * 0.04 : this.swayX * 0.3;
+    this.weapon.position.x = (fists ? 0.2 : 0.32) + side * (fists ? 0.03 : 0.015) + this.swayX;
+    this.weapon.position.y = (fists ? -0.2 : -0.22) + (fists && !this.onGround ? 0.04 : 0) - (fists ? 0 : this.swing * 0.08) + this.swayY - this.land * 0.03;
+    this.weapon.position.z = (fists ? -0.46 : -0.55) - punch * 0.32;
+    if (this.hand) {
+      const speed = Math.hypot(this.vel.x, this.vel.z);
+      const mode = punch > 0.04 ? "punch" : !this.onGround ? "jump" : !fists ? "grip" : speed > 6.2 ? "run" : speed > 1.15 ? "walk" : "idle";
+      this.hand.pose(mode, this.session, this.bob, punch);
+    }
 
     this.renderer.clear();
     this.renderer.render(this.scene, this.cam);
@@ -3251,7 +3544,8 @@ export class TribalsEngine {
       outfit: this.outfit,
       inventory: st.inventory,
       session: this.session,
-      builds: this.builds.map((b) => ({
+      worldId: this.worldId,
+      builds: this.builds.filter((b) => b.shared && b.key).map((b) => ({
         type: b.type,
         x: b.pos.x,
         y: b.pos.y,
@@ -3260,6 +3554,7 @@ export class TribalsEngine {
         code: b.code,
         owners: b.owners,
         open: b.open,
+        key: b.key,
       })),
     };
     try {
@@ -3295,8 +3590,10 @@ export class TribalsEngine {
         session: number;
         training: boolean;
         outfit: number;
-        builds: { type: ItemId; x: number; y: number; z: number; rot: number; code?: string; owners?: string[]; open?: boolean }[];
+        worldId?: string;
+        builds: { type: ItemId; x: number; y: number; z: number; rot: number; code?: string; owners?: string[]; open?: boolean; key?: string }[];
       };
+      if (d.worldId) this.worldId = d.worldId;
       this.pos.set(d.pos[0], d.pos[1], d.pos[2]);
       this.yaw = d.yaw;
       this.pitch = d.pitch;
@@ -3316,7 +3613,12 @@ export class TribalsEngine {
       this.outfit = d.outfit;
       useGameStore.getState().patch({ inventory: fitInv(d.inventory), outfit: d.outfit, training: d.training });
       for (const b of d.builds ?? []) {
-        const built = this.placeBuild(b.type, new THREE.Vector3(b.x, b.y, b.z), b.rot);
+        const dup = this.builds.some((e) => e.type === b.type && Math.hypot(e.pos.x - b.x, e.pos.z - b.z) < 0.35 && Math.abs(e.pos.y - b.y) < 0.4);
+        if (dup) continue;
+        const built = this.placeBuild(b.type, new THREE.Vector3(b.x, b.y, b.z), b.rot, false);
+        built.key = b.key || `${this.worldId}:${built.id}`;
+        built.shared = true;
+        this.seenBuild.add(built.key);
         built.code = b.code;
         built.owners = b.owners;
         if (b.open && built.type === "door") {

@@ -169,6 +169,7 @@ export const saveProgress = createServerFn({ method: "POST" })
       on conflict (user_id, server_id)
       do update set data = ${data.data}, updated_at = now()
     `;
+    const me = await readProfile(sql, context.userId);
     if (me) {
       await sql`
         insert into leaderboard (user_id, server_id, username, score, kills, updated_at)
@@ -284,6 +285,51 @@ export const moderation = createServerFn({ method: "GET" })
       kickedAt: rows[0]?.kicked_at ?? null,
       tribe: rows[0]?.tribe ?? null,
     };
+  });
+
+export const listPublicChat = createServerFn({ method: "GET" }).handler(async (): Promise<ChatRow[]> => {
+  const sql = await getSql();
+  const rows = await sql<{
+    id: number;
+    user_id: string;
+    username: string;
+    body: string;
+    created_at: string;
+    name_color: string | null;
+  }>`
+    select c.id, c.user_id, c.username, c.body, c.created_at, p.name_color
+    from chat_messages c
+    left join profiles p on p.user_id = c.user_id
+    order by c.id desc
+    limit 40
+  `;
+  return rows
+    .slice()
+    .reverse()
+    .filter((r) => !/granted admin/i.test(r.body))
+    .map((r) => ({
+      id: r.id,
+      userId: r.user_id,
+      username: r.username,
+      body: r.body,
+      at: r.created_at,
+      color: r.name_color && /^#[0-9a-fA-F]{6}$/.test(r.name_color) ? r.name_color : "#ffffff",
+    }));
+});
+
+export const sendGuestChat = createServerFn({ method: "POST" })
+  .validator((body: { name: string; text: string }) => ({
+    name: /^Gust\d{4}$/.test(body?.name ?? "") ? body.name : "",
+    text: typeof body?.text === "string" ? body.text.trim().slice(0, 240) : "",
+  }))
+  .handler(async ({ data }) => {
+    if (!data.name || !data.text || data.text.startsWith("/")) return { ok: false as const };
+    const sql = await getSql();
+    await sql`
+      insert into chat_messages (user_id, username, body)
+      values (${"guest"}, ${data.name}, ${data.text})
+    `;
+    return { ok: true as const };
   });
 
 export const listChat = createServerFn({ method: "GET" })
